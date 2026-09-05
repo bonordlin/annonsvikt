@@ -588,6 +588,7 @@ class Analys:
     typsnitt_deklarerade: int = 0
     konsolfel: list[str] = field(default_factory=list)
     varningar: list[str] = field(default_factory=list)
+    misslyckande: str = ""  # ifyllt när adressen inte gav någon annons att mäta
 
     @property
     def totalvikt(self) -> int:
@@ -846,7 +847,11 @@ def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: i
 
         if not tyst:
             print(f"  laddar {url} …", file=sys.stderr)
-        sida.goto(mal, wait_until="load", timeout=60000)
+        navfel = ""
+        try:
+            sida.goto(mal, wait_until="load", timeout=60000)
+        except Exception as fel:
+            navfel = las_navigeringsfel(fel)
         try:
             sida.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
@@ -913,7 +918,25 @@ def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: i
 
         webblasare.close()
 
-    return lage, forsta_kropp, rader, sonder, konsol, skarmbild
+    return lage, forsta_kropp, rader, sonder, konsol, skarmbild, navfel
+
+
+def las_navigeringsfel(fel: Exception) -> str:
+    """Chromiums felkoder säger inget för en användare — översätt dem."""
+    text = str(fel)
+    if "ERR_NAME_NOT_RESOLVED" in text:
+        return "Adressen gick inte att slå upp. Kontrollera att den är rätt stavad."
+    if "ERR_CERT" in text:
+        return "Adressens säkerhetscertifikat kunde inte verifieras."
+    if "ERR_CONNECTION_REFUSED" in text:
+        return "Servern nekade anslutningen."
+    if "ERR_CONNECTION" in text or "ERR_ADDRESS" in text or "ERR_INTERNET" in text:
+        return "Det gick inte att ansluta till adressen. Kontrollera nätverket."
+    if "Timeout" in text or "ERR_TIMED_OUT" in text:
+        return "Adressen svarade inte i tid — servern kan vara nere eller mycket långsam."
+    if "ERR_ABORTED" in text:
+        return "Laddningen avbröts av servern."
+    return "Adressen kunde inte laddas: " + text.splitlines()[0][:120]
 
 
 def sniffa(url: str) -> tuple[str, str]:
@@ -997,7 +1020,7 @@ def las_bannerboo(text: str, a: Analys) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def bygg_analys(kalla, lage, forsta_kropp, rader, sonder, konsol) -> Analys:
+def bygg_analys(kalla, lage, forsta_kropp, rader, sonder, konsol, navfel="") -> Analys:
     a = Analys(kalla=kalla, tidpunkt=dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
     a.konsolfel = konsol[:20]
 
@@ -1066,7 +1089,37 @@ def bygg_analys(kalla, lage, forsta_kropp, rader, sonder, konsol) -> Analys:
         a.resurser.append(r)
 
     berakna_potential(a)
+    a.misslyckande = navfel or bedom_misslyckande(a, lage, forsta_kropp)
     return a
+
+
+def bedom_misslyckande(a: Analys, lage: str, forsta_kropp: str) -> str:
+    """Gav adressen någon annons alls? Returnerar en förklaring om inte.
+
+    BannerBoo svarar med HTTP 200 även för ett id som inte finns — felet ligger i
+    ett JSON-svar i kroppen. Utan den här kontrollen blir resultatet en rapport på
+    noll byte utan antydan om varför."""
+    text = (forsta_kropp or "").strip()
+    if text.startswith("{"):
+        try:
+            svar = json.loads(text)
+        except json.JSONDecodeError:
+            svar = None
+        if isinstance(svar, dict) and svar.get("success") is False:
+            # Serverns egen text ("Method not allowed") är missvisande här och
+            # säger inget om den verkliga orsaken, så den återges inte.
+            return "Adressen finns hos BannerBoo men pekar inte på någon annons."
+
+    if not a.resurser:
+        return "Ingenting kunde laddas från adressen."
+
+    # En riktig BannerBoo-annons ger alltid en konfiguration med lager och mått.
+    if lage == "skript" and not a.lager and a.totalvikt < 5 * KB:
+        return (
+            f"Adressen svarade, men där fanns ingen annons att mäta — bara "
+            f"{fmt(a.totalvikt)} över {antal(len(a.resurser), 'förfrågan', 'förfrågningar')}."
+        )
+    return ""
 
 
 def berakna_potential(a: Analys) -> None:
@@ -1150,6 +1203,24 @@ def skriv_rapport(a: Analys, rad: list[Rad], visa_alla: bool) -> None:
     p("═" * W)
     p(f"  ANNONSVIKT · {a.kalla}")
     p("═" * W)
+
+    if a.misslyckande:
+        p("")
+        p("  MÄTNINGEN GAV INGEN ANNONS")
+        p("  " + "─" * (W - 4))
+        p(f"  {a.misslyckande}")
+        p("")
+        p("  Så här anges en annons:")
+        p("      annonsvikt bb6a6b2536dcc")
+        p("      annonsvikt https://embed.bannerboo.com/bb6a6b2536dcc")
+        p("")
+        p("  Ska en hel sida genomsökas efter annonser anges sidans adress i stället:")
+        p("      annonsvikt upphandling24.se")
+        p("")
+        p("  Ett vanligt misstag är att adressen råkat bli hopklistrad, till exempel")
+        p("  embed.bannerboo.com/embed.bannerboo.com/… — kontrollera att den ser rätt ut.")
+        p("")
+        return
 
     delar = []
     if a.bredd and a.hojd:
@@ -1350,6 +1421,17 @@ def html_innehall(a: Analys, rad: list[Rad], rubrik: str | None = None) -> list[
     farg = {"A": "var(--a)", "B": "var(--b)", "C": "var(--c)", "D": "var(--d)", "F": "var(--f)"}[bokstav]
     u = []
     u.append("<h1>Annonsvikt</h1>" if rubrik is None else f"<h2 class='annonsrubrik'>{e(rubrik)}</h2>")
+    if a.misslyckande:
+        u.append(
+            f'<div class="meta"><a href="{e(a.kalla)}">{e(a.kalla)}</a></div>'
+            "<div class='kort'><b>Mätningen gav ingen annons.</b><br>"
+            + e(a.misslyckande)
+            + "<br><br>Så här anges en annons: <code>bb6a6b2536dcc</code> eller "
+            "<code>https://embed.bannerboo.com/bb6a6b2536dcc</code>.<br>"
+            "Ska en hel sida genomsökas anges sidans adress i stället.</div>"
+        )
+        return u
+
     rubrikdelar = []
     if a.bredd:
         rubrikdelar.append(f"{a.bredd} × {a.hojd} px")
@@ -1470,10 +1552,10 @@ def html_rapport(a: Analys, rad: list[Rad]) -> str:
 
 
 def analysera(url: str, args) -> tuple[Analys, list[Rad], bytes | None]:
-    lage, kropp, rader, sonder, konsol, bild = mat_i_webblasare(
+    lage, kropp, rader, sonder, konsol, bild, navfel = mat_i_webblasare(
         url, args.vantetid, args.huvud, args.bredd, args.hojd, args.tyst
     )
-    a = bygg_analys(url, lage, kropp, rader, sonder, konsol)
+    a = bygg_analys(url, lage, kropp, rader, sonder, konsol, navfel)
     rad = samla_rad(a)
     return a, rad, bild
 
@@ -2425,7 +2507,9 @@ def main() -> None:
         print("  JÄMFÖRELSE — ALLA MÄTTA ANNONSER")
         print("═" * 78)
         print(f"  {'Annons':<44}{'Vikt':>12}  {'Betyg':>6}  {'Möjlig':>10}")
-        for a, rad, _ in sorted(resultat, key=lambda x: -x[0].totalvikt):
+        for a, rad, _ in sorted(
+            (r for r in resultat if not r[0].misslyckande), key=lambda x: -x[0].totalvikt
+        ):
             print(
                 f"  {a.kalla[-44:]:<44}{fmt(a.totalvikt):>12}  "
                 f"{satt_betyg(a.totalvikt)[0]:>6}  {fmt(a.potentialvikt):>10}"

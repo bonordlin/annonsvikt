@@ -164,10 +164,18 @@ class Annonsviktsfonster(tk.Tk):
             row=0, column=0, sticky="w", columnspan=2
         )
 
-        self.falt = ttk.Entry(ram, font=("Segoe UI", 11))
+        self.falt = ttk.Entry(ram, font=("Segoe UI", 11), foreground=SVAG)
         self.falt.grid(row=1, column=0, sticky="ew", pady=(3, 0), ipady=4)
-        self.falt.insert(0, forifylld or "https://embed.bannerboo.com/")
-        self.falt.select_range(0, "end")
+        # Platshållaren måste försvinna av sig själv. Stod adressen kvar som
+        # vanlig text kunde en inklistring hamna efter den och ge dubbel domän.
+        self._platshallare_syns = False
+        self.falt.bind("<FocusIn>", self._tom_platshallare)
+        self.falt.bind("<FocusOut>", self._visa_platshallare)
+        if forifylld:
+            self.falt.configure(foreground=TEXT)
+            self.falt.insert(0, forifylld)
+        else:
+            self._visa_platshallare()
         ram.columnconfigure(0, weight=1)
 
         self.knapp_mat = ttk.Button(
@@ -210,6 +218,21 @@ class Annonsviktsfonster(tk.Tk):
 
         self.progress = ttk.Progressbar(ram, mode="indeterminate", length=190)
         self.progress.grid(row=3, column=1, sticky="e", pady=(10, 0))
+
+    PLATSHALLARE = "t.ex. bb6a6b2536dcc  eller  upphandling24.se"
+
+    def _visa_platshallare(self, _händelse=None) -> None:
+        if not self.falt.get().strip():
+            self._platshallare_syns = True
+            self.falt.configure(foreground=SVAG)
+            self.falt.delete(0, "end")
+            self.falt.insert(0, self.PLATSHALLARE)
+
+    def _tom_platshallare(self, _händelse=None) -> None:
+        if self._platshallare_syns:
+            self._platshallare_syns = False
+            self.falt.delete(0, "end")
+            self.falt.configure(foreground=TEXT)
 
     def _bygg_betygskort(self) -> None:
         kort = ttk.Frame(self, style="Kort.TFrame", padding=16)
@@ -320,9 +343,17 @@ class Annonsviktsfonster(tk.Tk):
     def starta_matning(self) -> None:
         if self.korr:
             return
-        rå = self.falt.get().strip()
+        rå = "" if self._platshallare_syns else self.falt.get().strip()
         if not rå or rå.rstrip("/").endswith("bannerboo.com"):
-            messagebox.showinfo("Annonsvikt", "Fyll i en annonslänk eller ett BannerBoo-id först.")
+            messagebox.showinfo(
+                "Annonsvikt",
+                "Fyll i något att mäta först.\n\n"
+                "En annons anges med id eller länk:\n"
+                "    bb6a6b2536dcc\n"
+                "    https://embed.bannerboo.com/bb6a6b2536dcc\n\n"
+                "En hel sida anges med sidans adress:\n"
+                "    upphandling24.se",
+            )
             return
         try:
             vantetid = max(1.0, float(self.vantetid.get()))
@@ -420,6 +451,10 @@ class Annonsviktsfonster(tk.Tk):
             return
         _sort, analys, rad, bild = post
 
+        if getattr(analys, "misslyckande", ""):
+            self._rita_misslyckande(analys)
+            return
+
         bokstav, motivering = av.satt_betyg(analys.totalvikt)
         self.betygsruta.configure(text=bokstav, bg=BETYGSFARG[bokstav])
         self.etikett_vikt.configure(text=av.fmt(analys.totalvikt))
@@ -470,6 +505,41 @@ class Annonsviktsfonster(tk.Tk):
             ttk.Label(self.kategoriram, text=text, font=stil, anchor="e", width=11 if kol == 2 else 8).grid(
                 row=r, column=kol, sticky="e", padx=(6, 0)
             )
+
+    def _rita_misslyckande(self, analys) -> None:
+        """Adressen gav ingen annons — säg det i klartext i stället för tomma flikar."""
+        self.betygsruta.configure(text="?", bg=LINJE)
+        self.etikett_vikt.configure(text="Ingen annons hittades")
+        self.etikett_motiv.configure(text=analys.misslyckande)
+        self.etikett_format.configure(text=analys.kalla)
+        self.etikett_prognos.configure(text="")
+        self.status.configure(text=f"Ingen annons på {analys.kalla}")
+
+        for barn in self.kategoriram.winfo_children():
+            barn.destroy()
+        ttk.Label(
+            self.kategoriram,
+            justify="left",
+            text=(
+                "Så här anges en annons:\n"
+                "    bb6a6b2536dcc\n"
+                "    https://embed.bannerboo.com/bb6a6b2536dcc\n\n"
+                "Ska en hel sida genomsökas efter annonser anges sidans adress:\n"
+                "    upphandling24.se\n\n"
+                "Kontrollera också att adressen inte råkat bli hopklistrad,\n"
+                "till exempel embed.bannerboo.com/embed.bannerboo.com/…"
+            ),
+        ).grid(row=0, column=0, sticky="w", pady=8)
+
+        self.trad_filer.delete(*self.trad_filer.get_children())
+        self.trad_filer.insert("", "end", text="—", values=("", "", "", "ingen annons att mäta"))
+        self.radtext.configure(state="normal")
+        self.radtext.delete("1.0", "end")
+        self.radtext.insert("end", analys.misslyckande + "\n")
+        self.radtext.configure(state="disabled")
+        self.bildyta.configure(image="", text="ingen annons", width=34, height=10)
+        self._bild = None
+        self.flikar.select(0)
 
     def _rita_sida(self, s) -> None:
         """Sammanfattning av en hel sida: annonserna, delade filer och sidnivåråd."""
