@@ -1,0 +1,8 @@
+# Genererad utdata från körningar
+rapport.html
+matning.json
+annons.png
+*.pyc
+__pycache__/
+.venv/
+venv/
