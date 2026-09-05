@@ -144,8 +144,9 @@ installation — tkinter ingår i Python.
   på en rad för att öppna filen i webbläsaren
 - **Råd** — samma råd som kommandoraden ger, färgade efter allvarsgrad
 - Knappar för att spara HTML-rapport och JSON, eller öppna rapporten direkt
-- Vid sidskanning fylls resultatlistan med sidan överst och en rad per annons;
-  sidposten visar annonserna, de delade filerna och sidnivåråden
+- Vid sidskanning fylls resultatlistan med sidan överst och en rad per annons.
+  Sidposten visar annonserna i Översikt, **varje annons samtliga filer med vikt** i
+  Filer — grupperade per annons, med delade filer markerade — och sidnivåråden i Råd
 
 Mätningen körs i en egen tråd så att fönstret inte fryser medan annonsen laddas.
 

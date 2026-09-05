@@ -1544,6 +1544,7 @@ class Sidanalys:
     tidpunkt: str = ""
     varv: int = 1
     stabil: bool = False  # samma annonser i två varv i rad → platsen roterar inte
+    andra_iframes: list = field(default_factory=list)  # värdar för iframes som inte är BannerBoo
     poster: list = field(default_factory=list)  # (Annonsfynd, Analys, list[Rad])
     sidrad: list = field(default_factory=list)
     samtyckesknapp: str = ""
@@ -1678,7 +1679,12 @@ SIDSOND = r"""
     ut.push({ typ: 'skript', url: abs(s.getAttribute('src') || s.src),
               b: 0, h: 0, topp: 0, plats: plats(s) });
   });
-  return { element: ut, veck: window.innerHeight, sidhojd: document.body.scrollHeight };
+  const andra = [...document.querySelectorAll('iframe')]
+    .filter(f => !/bannerboo/i.test(f.getAttribute('src') || ''))
+    .map(f => { try { return new URL(f.src, location.href).hostname; } catch (e) { return ''; } })
+    .filter(Boolean);
+  return { element: ut, veck: window.innerHeight, sidhojd: document.body.scrollHeight,
+           andra_iframes: [...new Set(andra)] };
 }
 """
 
@@ -1775,6 +1781,7 @@ def skanna_sida(url: str, args):
     varningar: list[str] = []
     forra_uppsattningen: set | None = None
     korda_varv, stabil = 0, False
+    andra_iframes: set = set()
     vill_samtycka = not getattr(args, "utan_samtycke", False)
 
     traffar: list[str] = []
@@ -1826,6 +1833,7 @@ def skanna_sida(url: str, args):
             except Exception as fel:
                 varningar.append(f"varv {varv}: sidsonden misslyckades ({fel})")
             sidhojd = max(sidhojd, int(dom.get("sidhojd") or 0))
+            andra_iframes.update(dom.get("andra_iframes") or [])
             samla_fynd(fynd, traffar, dom, varv)
             korda_varv = varv
 
@@ -1846,12 +1854,14 @@ def skanna_sida(url: str, args):
         kontext.close()
         webblasare.close()
 
-    return list(fynd.values()), samtyckesknapp, banderoll, sidhojd, varningar, korda_varv, stabil
+    return (list(fynd.values()), samtyckesknapp, banderoll, sidhojd, varningar,
+            korda_varv, stabil, sorted(andra_iframes))
 
 
 def analysera_sida(url: str, args) -> Sidanalys:
     """Skannar sidan efter annonser och mäter var och en isolerat."""
-    fynd, knapp, banderoll, sidhojd, varningar, korda_varv, stabil = skanna_sida(url, args)
+    (fynd, knapp, banderoll, sidhojd, varningar,
+     korda_varv, stabil, andra_iframes) = skanna_sida(url, args)
     fynd.sort(key=lambda f: (f.topp_px or 10**9, f.id))
 
     s = Sidanalys(
@@ -1859,6 +1869,7 @@ def analysera_sida(url: str, args) -> Sidanalys:
         tidpunkt=dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         varv=korda_varv or max(1, args.varv),
         stabil=stabil,
+        andra_iframes=andra_iframes,
         samtyckesknapp=knapp,
         banderoll_sedd=banderoll,
         sidhojd=sidhojd,
@@ -2093,6 +2104,11 @@ def skriv_sidrapport(s: Sidanalys, visa_alla: bool) -> None:
     if not s.poster:
         p("")
         p("  Inga BannerBoo-annonser hittades på sidan.")
+        p("  Verktyget mäter bara annonser som ligger hos BannerBoo. En annonsplats kan")
+        p("  just nu innehålla något annat — en bildannons från den egna servern, till")
+        p("  exempel — och då finns det inget här att väga.")
+        if s.andra_iframes:
+            p(f"  Andra iframes på sidan: {', '.join(s.andra_iframes[:5])}")
         if s.banderoll_sedd and not s.samtyckesknapp:
             p("  En samtyckesbanderoll syntes — annonserna kan vara spärrade bakom den.")
         p("  Menade du att mäta URL:en som en annons i sig? Kör med --annons.")
@@ -2188,13 +2204,23 @@ def html_sidrapport(s: Sidanalys) -> str:
     )
 
     if not s.poster:
+        rader_tom = [
+            "Verktyget mäter bara annonser som ligger hos BannerBoo. En annonsplats kan "
+            "just nu innehålla något annat — en bildannons från den egna servern, till "
+            "exempel — och då finns det inget här att väga."
+        ]
+        if s.andra_iframes:
+            rader_tom.append("Andra iframes på sidan: " + ", ".join(s.andra_iframes[:5]) + ".")
+        if s.banderoll_sedd and not s.samtyckesknapp:
+            rader_tom.append(
+                "En samtyckesbanderoll syntes — annonserna kan vara spärrade bakom den."
+            )
+        rader_tom.append(
+            "Menade du att mäta URL:en som en annons i sig? Kör med <code>--annons</code>."
+        )
         u.append(
             "<div class='kort'><b>Inga BannerBoo-annonser hittades på sidan.</b><br>"
-            + (
-                "En samtyckesbanderoll syntes — annonserna kan vara spärrade bakom den."
-                if s.banderoll_sedd and not s.samtyckesknapp
-                else "Menade du att mäta URL:en som en annons i sig? Kör med <code>--annons</code>."
-            )
+            + "<br>".join(rader_tom)
             + "</div>"
         )
         return HTML_MALL.replace("__KALLA__", e(s.url)).replace("__INNEHALL__", "\n".join(u))
@@ -2279,6 +2305,7 @@ def sida_till_dict(s: Sidanalys) -> dict:
         "samtyckesknapp": s.samtyckesknapp,
         "banderoll_sedd": s.banderoll_sedd,
         "sidhojd": s.sidhojd,
+        "andra_iframes": s.andra_iframes,
         "antal_annonser": len(s.poster),
         "summa_var_for_sig": s.summa_var_for_sig,
         "delad_vikt": s.delad_vikt,

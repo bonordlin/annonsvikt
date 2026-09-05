@@ -269,7 +269,7 @@ class Annonsviktsfonster(tk.Tk):
         import tkinter.font as tkfont
 
         mat = tkfont.Font(font=TABELL).measure("0")
-        self.trad_filer.column("#0", width=mat * 34, anchor="w", stretch=False)
+        self.trad_filer.column("#0", width=mat * 38, anchor="w", stretch=False)
         self.trad_filer.column("typ", width=mat * 7, anchor="w", stretch=False)
         self.trad_filer.column("vikt", width=mat * 10, anchor="e", stretch=False)
         self.trad_filer.column("andel", width=mat * 8, anchor="e", stretch=False)
@@ -279,6 +279,8 @@ class Annonsviktsfonster(tk.Tk):
         self.trad_filer.pack(side="left", fill="both", expand=True)
         rull.pack(side="right", fill="y")
         self.trad_filer.tag_configure("varning", foreground=BETYGSFARG["F"])
+        self.trad_filer.tag_configure("annonsrad", font=("Consolas", 10, "bold"))
+        self.trad_filer.tag_configure("delad", foreground="#1f7a4d")
         self.trad_filer.bind("<Double-1>", self._oppna_fil)
 
         # Råd
@@ -528,23 +530,61 @@ class Annonsviktsfonster(tk.Tk):
         self.bildyta.configure(image="", text="sidöversikt", width=34, height=10)
         self._bild = None
 
-        # Filer: de som delas mellan annonserna
-        self.trad_filer.delete(*self.trad_filer.get_children())
-        _unik, delade = s.delning()
-        for url, storlek, antal_annonser in delade:
-            namn = [d for d in url.split("?")[0].split("/") if d]
-            self.trad_filer.insert(
-                "", "end", text=(namn[-1] if namn else url)[:44], iid=url,
-                values=("delad", av.fmt(storlek), "",
-                        f"hämtas en gång, används av {antal_annonser} annonser"),
-            )
-        if not delade:
-            self.trad_filer.insert(
-                "", "end", text="—", values=("", "", "", "inga filer delas mellan annonserna")
-            )
+        self._rita_sidfiler(s)
 
         self._rita_rad(s.sidrad)
         self.flikar.select(0)
+
+    def _rita_sidfiler(self, s) -> None:
+        """Varje annons filer under en egen rubrikrad, delade filer markerade."""
+        self.trad_filer.delete(*self.trad_filer.get_children())
+        _unik, delade = s.delning()
+        antal_per_url = {url: antal for url, _storlek, antal in delade}
+        sidtotal = s.summa_var_for_sig or 1
+
+        if not s.poster:
+            self.trad_filer.insert(
+                "", "end", text="—",
+                values=("", "", "", "inga annonser hittades på sidan"),
+            )
+            return
+
+        for fynd, analys, _rad in s.poster:
+            forald = self.trad_filer.insert(
+                "", "end",
+                text=f"{fynd.id}  ({fynd.format} px)",
+                iid=f"annons:{fynd.id}",
+                open=True,
+                tags=("annonsrad",),
+                values=(
+                    "annons",
+                    av.fmt(analys.totalvikt),
+                    av.procent(analys.totalvikt, sidtotal),
+                    f"{av.antal(len(analys.resurser), 'fil', 'filer')}"
+                    f" · betyg {av.satt_betyg(analys.totalvikt)[0]}"
+                    f" · {fynd.plats or 'okänd annonsplats'}",
+                ),
+            )
+            total = analys.totalvikt or 1
+            for r in sorted(analys.resurser, key=lambda x: -x.storlek):
+                anm = self._filanmarkning(r)
+                delad = antal_per_url.get(r.url)
+                if delad:
+                    anm.append(f"delas med {delad - 1} annan annons"
+                               if delad == 2 else f"delas med {delad - 1} andra annonser")
+                taggar = ("varning",) if r.dold_orsak else (("delad",) if delad else ())
+                self.trad_filer.insert(
+                    forald, "end",
+                    text=r.filnamn,
+                    iid=f"{fynd.id}|{r.url}",
+                    tags=taggar,
+                    values=(
+                        r.underformat or r.kategori,
+                        av.fmt(r.storlek),
+                        av.procent(r.storlek, total),
+                        ", ".join(anm),
+                    ),
+                )
 
     def _rita_kategorier(self, analys) -> None:
         for barn in self.kategoriram.winfo_children():
@@ -579,25 +619,30 @@ class Annonsviktsfonster(tk.Tk):
             str(len(analys.resurser)), fet=True,
         )
 
+    @staticmethod
+    def _filanmarkning(r) -> list[str]:
+        """Samma anmärkningar som kommandoraden skriver ut för en fil."""
+        anm = []
+        if r.dold_orsak:
+            anm.append(f"DOLD ({r.dold_orsak})")
+        if r.overdim_faktor and r.overdim_faktor > 1.15:
+            anm.append(f"{r.nat_b}×{r.nat_h} → {r.vis_b}×{r.vis_h} px")
+        if r.text_utan_komprimering:
+            anm.append("okomprimerad")
+        if r.bibliotek:
+            anm.append(r.bibliotek)
+        if r.sparning:
+            anm.append("spårning")
+        if r.tredjepart and not r.bibliotek:
+            anm.append("extern värd")
+        if r.status >= 400:
+            anm.append(f"HTTP {r.status}")
+        return anm
+
     def _rita_filer(self, analys) -> None:
         self.trad_filer.delete(*self.trad_filer.get_children())
         total = analys.totalvikt or 1
         for r in sorted(analys.resurser, key=lambda x: -x.storlek):
-            anm = []
-            if r.dold_orsak:
-                anm.append(f"DOLD ({r.dold_orsak})")
-            if r.overdim_faktor and r.overdim_faktor > 1.15:
-                anm.append(f"{r.nat_b}×{r.nat_h} → {r.vis_b}×{r.vis_h} px")
-            if r.text_utan_komprimering:
-                anm.append("okomprimerad")
-            if r.bibliotek:
-                anm.append(r.bibliotek)
-            if r.sparning:
-                anm.append("spårning")
-            if r.tredjepart and not r.bibliotek:
-                anm.append("extern värd")
-            if r.status >= 400:
-                anm.append(f"HTTP {r.status}")
             self.trad_filer.insert(
                 "", "end", text=r.filnamn, iid=r.url,
                 tags=("varning",) if r.dold_orsak else (),
@@ -605,7 +650,7 @@ class Annonsviktsfonster(tk.Tk):
                     r.underformat or r.kategori,
                     av.fmt(r.storlek),
                     av.procent(r.storlek, total),
-                    ", ".join(anm),
+                    ", ".join(self._filanmarkning(r)),
                 ),
             )
 
@@ -652,7 +697,10 @@ class Annonsviktsfonster(tk.Tk):
             knapp.configure(state=lage)
 
     def _oppna_fil(self, _händelse=None) -> None:
+        # I sidvyn har raderna formen "<annons-id>|<url>" för att bli unika.
         val = self.trad_filer.focus()
+        if "|" in val:
+            val = val.split("|", 1)[1]
         if val.startswith("http"):
             webbrowser.open(val)
 
