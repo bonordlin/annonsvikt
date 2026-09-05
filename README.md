@@ -9,7 +9,36 @@ IAB:s budget och ger konkreta råd om vad som bör göras för att minska tyngde
 Byggt för BannerBoo-länkar (`embed.bannerboo.com/<id>`) men fungerar på vilken
 annons-URL som helst — både inbäddningsskript och färdiga HTML-kreativ.
 
-## Installation
+## Installation på Windows
+
+Kör **AnnonsviktSetup.exe**. Guiden lägger programmet i din användarprofil, så
+ingen administratörsbehörighet behövs och ingen UAC-ruta dyker upp.
+
+Installeraren sköter allt annat också: den letar rätt på en Python på datorn och
+installerar en om ingen finns, bygger en egen Python-miljö åt Annonsvikt så att
+inget annat på datorn påverkas, hämtar Playwright och webbläsaren Chromium, och
+provstartar programmet innan den säger sig vara klar. Räkna med några minuter
+första gången — Chromium är ungefär 150 MB.
+
+Efteråt ligger Annonsvikt på Start-menyn och i Windows sökruta, med egen ikon i
+aktivitetsfältet, och avinstalleras från *Appar och funktioner* som vilket annat
+program som helst. På Start-menyn finns dessutom:
+
+- **Annonsvikt på kommandoraden** — ett fönster där kommandot `annonsvikt` är redo
+- **Reparera Annonsvikt** — bygger om Python-miljön om något gått sönder
+
+### Bygga installeraren själv
+
+```bat
+winget install -e --id JRSoftware.InnoSetup
+bygg-installerare.cmd
+```
+
+Resultatet hamnar i `dist\AnnonsviktSetup.exe`. Bygget ritar först om ikonen med
+`verktyg\skapa_ikon.py` och kompilerar sedan `installer\annonsvikt.iss`.
+Inno Setup behövs bara för att bygga, aldrig för att köra.
+
+## Installation från källkod
 
 ```bash
 pip install -r requirements.txt

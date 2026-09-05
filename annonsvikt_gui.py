@@ -57,6 +57,9 @@ RUBRIK = ("Segoe UI", 10, "bold")
 TABELL = ("Consolas", 10)
 
 
+APP_ID = "Upphandling24.Annonsvikt"
+
+
 def gor_dpi_medveten() -> None:
     """Utan det här skalar Windows upp fönstret och det växer ur skärmen."""
     if sys.platform != "win32":
@@ -72,11 +75,39 @@ def gor_dpi_medveten() -> None:
             pass
 
 
+def satt_app_id() -> None:
+    """Ger programmet en egen plats i aktivitetsfältet i stället för pythonw.exe:s."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except Exception:
+        pass
+
+
+def ikonsokvag() -> str:
+    """Ikonen ligger bredvid programfilen efter installation."""
+    for mapp in (os.path.dirname(os.path.abspath(__file__)),
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "installer")):
+        stig = os.path.join(mapp, "annonsvikt.ico")
+        if os.path.exists(stig):
+            return stig
+    return ""
+
+
 class Annonsviktsfonster(tk.Tk):
     def __init__(self, forifylld: str = ""):
         super().__init__()
         self.title("Annonsvikt")
         self.configure(bg=BG)
+        ikon = ikonsokvag()
+        if ikon:
+            try:
+                self.iconbitmap(default=ikon)
+            except tk.TclError:
+                pass
         bredd = min(1240, self.winfo_screenwidth() - 60)
         hojd = min(830, self.winfo_screenheight() - 80)
         x = max(0, (self.winfo_screenwidth() - bredd) // 2)
@@ -680,6 +711,7 @@ def main() -> None:
         print(__doc__)
         return
     gor_dpi_medveten()
+    satt_app_id()
     Annonsviktsfonster(forifylld).mainloop()
 
 
