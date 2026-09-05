@@ -36,6 +36,27 @@ Tar full URL, URL utan protokoll, eller bara BannerBoo-id:t.
 | `--huvud` | visa webbläsarfönstret (felsökning) |
 | `--tyst` | inga statusrader |
 
+## Grafiskt gränssnitt
+
+```bash
+python annonsvikt_gui.py
+python annonsvikt_gui.py b990849fd8c4b      # förifyllt fält
+```
+
+Ett fönster där du klistrar in länken och trycker Mät. Samma mätmotor som
+kommandoraden, ingen extra installation — tkinter ingår i Python.
+
+- **Betygskort** med vikt, motivering, format och prognos efter åtgärd
+- **Översikt** — vikt per del med staplar, plus en skärmbild av annonsen som
+  den faktiskt renderades
+- **Filer** — alla resurser med storlek, andel och anmärkningar; dubbelklicka
+  på en rad för att öppna filen i webbläsaren
+- **Råd** — samma råd som kommandoraden ger, färgade efter allvarsgrad
+- Knappar för att spara HTML-rapport och JSON, eller öppna rapporten direkt
+- Rullgardin med tidigare mätningar i samma session, för att jämföra annonser
+
+Mätningen körs i en egen tråd så att fönstret inte fryser medan annonsen laddas.
+
 ## Så mäts vikten
 
 En syntetisk värdsida byggs med `<script src="…">`, precis som en riktig sajt
