@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <title>Testsida med två annonser</title>
+  <style>
+    body { font: 16px/1.6 system-ui, sans-serif; margin: 0; padding: 40px; }
+    .innehall { height: 1400px; }
+    .plats { margin: 40px 0; }
+  </style>
+</head>
+<body>
+  <h1>Testsida — två BannerBoo-annonser</h1>
+  <p>Används för att verifiera att sidskanningen hittar flera annonser och att
+     delade resurser bara räknas en gång.</p>
+
+  <div class="plats" id="topplats">
+    <script src="https://embed.bannerboo.com/bb6a6b2536dcc?responsive=1"></script>
+  </div>
+
+  <div class="innehall">
+    <p>Text som skjuter ner nästa annons under vecket.</p>
+  </div>
+
+  <div class="plats" id="bottenplats">
+    <script src="https://embed.bannerboo.com/b1c7313227439?responsive=1"></script>
+  </div>
+</body>
+</html>

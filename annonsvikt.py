@@ -1330,17 +1330,26 @@ HTML_MALL = """<!doctype html>
   .prognos div{flex:1;min-width:150px}
   .stor{font-size:24px;font-weight:700}
   footer{color:var(--svag);font-size:13px;margin-top:40px;border-top:1px solid var(--linje);padding-top:14px}
+  .annonsrubrik{font-size:20px;text-transform:none;letter-spacing:0;color:var(--text);
+     margin-top:52px;padding-top:22px;border-top:2px solid var(--linje)}
+  .sidkort{display:flex;gap:32px;flex-wrap:wrap;align-items:flex-start}
+  .sidkort>div{min-width:165px}
+  .btg{display:inline-block;width:23px;height:23px;border-radius:5px;color:#fff;
+       text-align:center;font-weight:700;font-size:13px;line-height:23px}
+  .delad{color:var(--a);font-weight:600}
 </style></head><body><div class="wrap">
 __INNEHALL__
 </div></body></html>"""
 
 
-def html_rapport(a: Analys, rad: list[Rad]) -> str:
+def html_innehall(a: Analys, rad: list[Rad], rubrik: str | None = None) -> list[str]:
+    """Rapportens kropp. Bruten ur html_rapport så att sidrapporten kan bädda in en
+    sektion per annons utan att upprepa hela dokumentet."""
     e = lambda s: htmlmod.escape(str(s))
     bokstav, motivering = satt_betyg(a.totalvikt)
     farg = {"A": "var(--a)", "B": "var(--b)", "C": "var(--c)", "D": "var(--d)", "F": "var(--f)"}[bokstav]
     u = []
-    u.append(f"<h1>Annonsvikt</h1>")
+    u.append("<h1>Annonsvikt</h1>" if rubrik is None else f"<h2 class='annonsrubrik'>{e(rubrik)}</h2>")
     rubrikdelar = []
     if a.bredd:
         rubrikdelar.append(f"{a.bredd} × {a.hojd} px")
@@ -1438,16 +1447,25 @@ def html_rapport(a: Analys, rad: list[Rad]) -> str:
         mv = max(mal - valfri, 0)
         u.append(f"<div><div class='varfor'>Med större ingrepp</div><div class='stor'>{e(fmt(mv))}</div><div>betyg {satt_betyg(mv)[0]}</div></div>")
     u.append("</div>")
-    u.append(
-        "<footer>Mätt med annonsvikt.py — riktig headless Chromium, tom cache, "
-        "alla nätverkssvar inspelade. Besparingar är uppskattningar baserade på "
-        "typiska konverteringsvinster.</footer>"
+    return u
+
+
+FOTNOT = (
+    "<footer>Mätt med annonsvikt.py — riktig headless Chromium, tom cache, "
+    "alla nätverkssvar inspelade. Besparingar är uppskattningar baserade på "
+    "typiska konverteringsvinster.</footer>"
+)
+
+
+def html_rapport(a: Analys, rad: list[Rad]) -> str:
+    u = html_innehall(a, rad) + [FOTNOT]
+    return HTML_MALL.replace("__KALLA__", htmlmod.escape(a.kalla)).replace(
+        "__INNEHALL__", "\n".join(u)
     )
-    return HTML_MALL.replace("__KALLA__", e(a.kalla)).replace("__INNEHALL__", "\n".join(u))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CLI
+#  ANALYS AV EN ENSKILD ANNONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1458,6 +1476,831 @@ def analysera(url: str, args) -> tuple[Analys, list[Rad], bytes | None]:
     a = bygg_analys(url, lage, kropp, rader, sonder, konsol)
     rad = samla_rad(a)
     return a, rad, bild
+
+
+def analys_till_dict(a: Analys, rad: list[Rad]) -> dict:
+    """Mätningen som JSON-vänlig struktur."""
+    d = asdict(a)
+    d["typsnitt_laddade"] = sorted(a.typsnitt_laddade)
+    d["animationstyper"] = sorted(a.animationstyper)
+    d["totalvikt"] = a.totalvikt
+    d["potentialvikt"] = a.potentialvikt
+    d["betyg"] = satt_betyg(a.totalvikt)[0]
+    d["rad"] = [asdict(r) for r in rad]
+    return d
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SIDSKANNING — hitta alla BannerBoo-annonser på en sida och mät dem
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  Annonserna injiceras av JavaScript (Advanced Ads, postscribe) och roterar mellan
+#  sidladdningar. Därför laddas sidan i en riktig webbläsare flera varv i samma
+#  session — rotationen styrs av en kaka och avancerar bara om sessionen behålls.
+#  Varje funnen annons mäts sedan isolerat med analysera() och tom cache, så att
+#  siffrorna blir jämförbara med en enskild mätning.
+#
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Ett BannerBoo-id är hexadecimalt. Kravet gör att /assets/render.min.js inte matchar.
+MONSTER_LADDARE = re.compile(r"embed\.bannerboo\.com/([0-9a-f]{8,20})(?:[?#]|$)", re.I)
+MONSTER_IFRAME = re.compile(r"embed\.bannerboo\.com/embed/[^/]+/[^/]+/([0-9a-f]{8,20})/", re.I)
+
+# Delad hjälpfil som alla responsiva annonser på en sida hämtar en gång.
+RENDERAREN = "assets/render.min.js"
+
+
+@dataclass
+class Annonsfynd:
+    """En annons som hittats på sidan, innan den mätts."""
+
+    id: str
+    laddar_url: str = ""
+    iframe_url: str = ""
+    bredd: int = 0
+    hojd: int = 0
+    topp_px: int = 0
+    ovanfor_veck: bool = False
+    plats: str = ""
+    responsive: bool = False
+    varv_sedd: set = field(default_factory=set)
+
+    @property
+    def matning_url(self) -> str:
+        """URL:en som ska mätas — helst den exakta som sidan använde."""
+        if self.laddar_url:
+            return self.laddar_url
+        fraga = "?responsive=1" if self.responsive else ""
+        return f"https://embed.bannerboo.com/{self.id}{fraga}"
+
+    @property
+    def format(self) -> str:
+        return f"{self.bredd}×{self.hojd}" if self.bredd else "—"
+
+
+@dataclass
+class Sidanalys:
+    url: str
+    tidpunkt: str = ""
+    varv: int = 1
+    stabil: bool = False  # samma annonser i två varv i rad → platsen roterar inte
+    poster: list = field(default_factory=list)  # (Annonsfynd, Analys, list[Rad])
+    sidrad: list = field(default_factory=list)
+    samtyckesknapp: str = ""
+    banderoll_sedd: bool = False
+    sidhojd: int = 0
+    varningar: list = field(default_factory=list)
+
+    @property
+    def summa_var_for_sig(self) -> int:
+        """Vad annonserna väger om var och en mäts för sig — dagens siffra."""
+        return sum(a.totalvikt for _, a, _ in self.poster)
+
+    def delning(self):
+        """Union över resurs-URL:er. Varje fil räknas full vikt första gången den ses.
+
+        Returnerar (unik vikt, lista över delade filer sorterad efter besparing)."""
+        sedd: dict[str, list] = {}
+        unik = 0
+        for _, analys, _ in self.poster:
+            for r in analys.resurser:
+                if r.url in sedd:
+                    sedd[r.url][1] += 1
+                else:
+                    sedd[r.url] = [r.storlek, 1]
+                    unik += r.storlek
+        delade = [
+            (url, storlek, antal) for url, (storlek, antal) in sedd.items() if antal > 1
+        ]
+        delade.sort(key=lambda x: -(x[1] * (x[2] - 1)))
+        return unik, delade
+
+    @property
+    def delad_vikt(self) -> int:
+        return self.delning()[0]
+
+    @property
+    def vinst_av_delning(self) -> int:
+        return self.summa_var_for_sig - self.delad_vikt
+
+
+# ── Samtyckesbanderoll ────────────────────────────────────────────────────────
+
+SAMTYCKE_JS = r"""
+() => {
+  const synlig = el => el && el.offsetParent !== null &&
+        el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0;
+  const beskriv = el => el.tagName.toLowerCase() +
+        (el.id ? '#' + el.id : '') +
+        (el.className ? '.' + String(el.className).trim().split(/\s+/).join('.') : '') +
+        ' — "' + (el.textContent || el.value || '').trim().slice(0, 40) + '"';
+
+  // Kända "tillåt allt"-knappar först — de är entydiga.
+  const specifika = ['.cc-allowall', '.cc-btn.cc-allow', '#cc-approve-button-thissite',
+                     '[class*="allowall"]', '[class*="allow-all"]', '[class*="accept-all"]',
+                     '[id*="accept-all"]', '[id*="acceptAll"]', '[class*="acceptAll"]'];
+  for (const s of specifika) {
+    let träff = null;
+    try { träff = [...document.querySelectorAll(s)].find(synlig); } catch (e) {}
+    if (träff) {
+      träff.setAttribute('data-annonsvikt-samtycke', '1');
+      return { hittad: true, beskrivning: beskriv(träff), banderoll: true };
+    }
+  }
+
+  // Annars: knapp med rätt text, men bara inuti en samtyckesbehållare — annars
+  // riskerar vi att klicka på ett "OK" någon helt annanstans på sidan.
+  const behallare = [...document.querySelectorAll(
+      '[class*="cc-"],[id*="cookie"],[class*="cookie"],[class*="consent"],' +
+      '[id*="consent"],[class*="cmp"],[class*="gdpr"],[id*="gdpr"]')].filter(synlig);
+  const monster = /tillåt alla|acceptera alla|godkänn alla|jag samtycker|godkänn|acceptera|allow all|accept all|tillåt/i;
+  for (const b of behallare) {
+    const knapp = [...b.querySelectorAll('a,button,input[type=button],input[type=submit],[role=button]')]
+      .filter(synlig)
+      .find(e => monster.test((e.textContent || e.value || '')));
+    if (knapp) {
+      knapp.setAttribute('data-annonsvikt-samtycke', '1');
+      return { hittad: true, beskrivning: beskriv(knapp), banderoll: true };
+    }
+  }
+  return { hittad: false, banderoll: behallare.length > 0 };
+}
+"""
+
+
+def godkann_samtycke(sida) -> tuple[str, bool]:
+    """Klickar i "tillåt allt" så att annonserna inte hålls tillbaka.
+
+    Returnerar (beskrivning av knappen, om en banderoll alls syntes)."""
+    try:
+        svar = sida.evaluate(SAMTYCKE_JS)
+    except Exception:
+        return "", False
+    if not svar or not svar.get("hittad"):
+        return "", bool(svar and svar.get("banderoll"))
+
+    beskrivning = svar.get("beskrivning", "")
+    try:
+        sida.click("[data-annonsvikt-samtycke]", timeout=5000)
+    except Exception:
+        # Banderollen kan ligga under ett overlay — klicka via DOM i stället.
+        try:
+            sida.evaluate("document.querySelector('[data-annonsvikt-samtycke]').click()")
+            beskrivning += "  (JS-klick)"
+        except Exception:
+            return "", True
+    sida.wait_for_timeout(1200)  # låt annonsskripten som samtycket låser upp starta
+    return beskrivning, True
+
+
+# ── Sond som läser annonsplatserna ur den renderade sidan ────────────────────
+
+SIDSOND = r"""
+() => {
+  const abs = u => { try { return new URL(u, location.href).href; } catch (e) { return u; } };
+  const hexId = /^[0-9a-f]{8,20}$/i;   // BannerBoos egen wrapper, inte en annonsplats
+  const plats = el => {
+    let e = el.parentElement;
+    while (e && e !== document.body) {
+      if (e.id && !hexId.test(e.id)) return '#' + e.id;
+      e = e.parentElement;
+    }
+    return '';
+  };
+  const ut = [];
+  document.querySelectorAll('iframe[src*="bannerboo"]').forEach(f => {
+    const r = f.getBoundingClientRect();
+    ut.push({ typ: 'iframe', url: abs(f.getAttribute('src') || f.src),
+              b: Math.round(r.width), h: Math.round(r.height),
+              topp: Math.round(r.top + window.scrollY), plats: plats(f) });
+  });
+  document.querySelectorAll('script[src*="bannerboo"]').forEach(s => {
+    ut.push({ typ: 'skript', url: abs(s.getAttribute('src') || s.src),
+              b: 0, h: 0, topp: 0, plats: plats(s) });
+  });
+  return { element: ut, veck: window.innerHeight, sidhojd: document.body.scrollHeight };
+}
+"""
+
+
+def annons_id(url: str) -> str:
+    """Plockar ut BannerBoo-id ur en laddar- eller iframe-URL."""
+    if RENDERAREN in url:
+        return ""
+    for monster in (MONSTER_IFRAME, MONSTER_LADDARE):
+        m = monster.search(url)
+        if m:
+            return m.group(1).lower()
+    return ""
+
+
+def rulla_igenom(sida, steg: int = 900, max_steg: int = 40) -> None:
+    """Scrollar igenom sidan så att lazy-laddade annonser hinner triggas."""
+    try:
+        hojd = int(sida.evaluate("document.body.scrollHeight") or 0)
+    except Exception:
+        return
+    y, n = 0, 0
+    while y < hojd and n < max_steg:
+        y += steg
+        n += 1
+        try:
+            sida.evaluate(f"window.scrollTo(0, {y})")
+        except Exception:
+            break
+        sida.wait_for_timeout(140)
+    try:
+        sida.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+    sida.wait_for_timeout(400)
+
+
+def samla_fynd(fynd: dict, traffar: list, dom: dict, varv: int) -> None:
+    """Slår ihop nätverksträffar och DOM-sond till Annonsfynd."""
+    for url in traffar:
+        aid = annons_id(url)
+        if not aid:
+            continue
+        f = fynd.setdefault(aid, Annonsfynd(id=aid))
+        f.varv_sedd.add(varv)
+        if MONSTER_IFRAME.search(url):
+            f.iframe_url = f.iframe_url or url
+        else:
+            f.laddar_url = f.laddar_url or url
+        if "responsive=1" in url:
+            f.responsive = True
+
+    for el in dom.get("element", []):
+        url = el.get("url", "")
+        aid = annons_id(url)
+        if not aid:
+            continue
+        f = fynd.setdefault(aid, Annonsfynd(id=aid))
+        f.varv_sedd.add(varv)
+        if "responsive=1" in url:
+            f.responsive = True
+        if el.get("typ") == "skript":
+            f.laddar_url = url  # exakt URL med query, den vi helst mäter
+            if not f.plats:
+                f.plats = el.get("plats", "")
+            continue
+        f.iframe_url = url
+        if el.get("b"):
+            f.bredd, f.hojd = int(el["b"]), int(el["h"])
+        if el.get("topp"):
+            f.topp_px = int(el["topp"])
+            f.ovanfor_veck = f.topp_px < int(dom.get("veck") or 0)
+        if el.get("plats"):
+            f.plats = el["plats"]
+
+
+def skanna_sida(url: str, args):
+    """Laddar sidan `args.varv` gånger i samma session och samlar alla BannerBoo-annonser.
+
+    Sessionen delas mellan varven med flit: annonsrotationen styrs av en kaka, så en
+    ny kontext per varv skulle ge samma annons om och om igen. Varje annons mäts
+    däremot isolerat efteråt, med tom cache."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        sys.exit(
+            "Playwright saknas. Installera med:\n"
+            "    pip install playwright\n"
+            "    python -m playwright install chromium"
+        )
+
+    fynd: dict[str, Annonsfynd] = {}
+    samtyckesknapp, banderoll, sidhojd = "", False, 0
+    varningar: list[str] = []
+    forra_uppsattningen: set | None = None
+    korda_varv, stabil = 0, False
+    vill_samtycka = not getattr(args, "utan_samtycke", False)
+
+    traffar: list[str] = []
+
+    with sync_playwright() as p:
+        webblasare = p.chromium.launch(headless=not args.huvud)
+        # EN kontext för hela skanningen. Annonsrotationen i Advanced Ads styrs av en
+        # kaka — med ny kontext per varv nollställs räknaren och samma annons kommer
+        # tillbaka varje gång. En besökare som laddar om sidan får nästa annons, och
+        # det är beteendet vi vill efterlikna.
+        kontext = webblasare.new_context(
+            viewport={"width": args.bredd, "height": args.hojd},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            ),
+        )
+        kontext.on("request", lambda begaran: traffar.append(begaran.url))
+        sida = kontext.new_page()
+
+        for varv in range(1, max(1, args.varv) + 1):
+            if not args.tyst:
+                print(f"  varv {varv}/{args.varv}: laddar {url} …", file=sys.stderr)
+            traffar.clear()
+            try:
+                sida.goto(url, wait_until="load", timeout=60000)
+            except Exception as fel:
+                varningar.append(f"varv {varv}: sidan kunde inte laddas ({fel})")
+                continue
+
+            if vill_samtycka:
+                # Efter första varvet ligger samtycket i en kaka och banderollen
+                # visas inte igen — då returnerar den här tomt, vilket är rätt.
+                knapp, sedd = godkann_samtycke(sida)
+                banderoll = banderoll or sedd
+                if knapp and not samtyckesknapp:
+                    samtyckesknapp = knapp
+
+            rulla_igenom(sida)
+            try:
+                sida.wait_for_load_state("networkidle", timeout=12000)
+            except Exception:
+                pass
+            sida.wait_for_timeout(int(min(args.vantetid, 6) * 1000))
+
+            dom = {}
+            try:
+                dom = sida.evaluate(SIDSOND)
+            except Exception as fel:
+                varningar.append(f"varv {varv}: sidsonden misslyckades ({fel})")
+            sidhojd = max(sidhojd, int(dom.get("sidhojd") or 0))
+            samla_fynd(fynd, traffar, dom, varv)
+            korda_varv = varv
+
+            # Ger två varv i rad exakt samma annonser roterar platsen inte, och
+            # fler varv tillför ingenting utom väntetid.
+            nu = {f.id for f in fynd.values() if varv in f.varv_sedd}
+            if nu and nu == forra_uppsattningen:
+                stabil = True
+                if not args.tyst:
+                    print(
+                        f"  samma annonser i varv {varv - 1} och {varv} — "
+                        "annonsvalet är stabilt, avbryter",
+                        file=sys.stderr,
+                    )
+                break
+            forra_uppsattningen = nu
+
+        kontext.close()
+        webblasare.close()
+
+    return list(fynd.values()), samtyckesknapp, banderoll, sidhojd, varningar, korda_varv, stabil
+
+
+def analysera_sida(url: str, args) -> Sidanalys:
+    """Skannar sidan efter annonser och mäter var och en isolerat."""
+    fynd, knapp, banderoll, sidhojd, varningar, korda_varv, stabil = skanna_sida(url, args)
+    fynd.sort(key=lambda f: (f.topp_px or 10**9, f.id))
+
+    s = Sidanalys(
+        url=url,
+        tidpunkt=dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        varv=korda_varv or max(1, args.varv),
+        stabil=stabil,
+        samtyckesknapp=knapp,
+        banderoll_sedd=banderoll,
+        sidhojd=sidhojd,
+        varningar=varningar,
+    )
+    for i, f in enumerate(fynd, 1):
+        if not args.tyst:
+            print(f"  mäter annons {i}/{len(fynd)}: {f.id}", file=sys.stderr)
+        try:
+            analys, rad, _bild = analysera(f.matning_url, args)
+        except Exception as fel:
+            s.varningar.append(f"annonsen {f.id} kunde inte mätas: {fel}")
+            continue
+        s.poster.append((f, analys, rad))
+
+    s.sidrad = samla_sidrad(s)
+    return s
+
+
+def ar_annonslank(url: str) -> bool:
+    """Är det här en annons hos BannerBoo, eller en sida att skanna?"""
+    return urllib.parse.urlparse(url).netloc.lower().endswith("bannerboo.com")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SIDNIVÅRÅD — REDIGERA HÄR
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  Samma mönster som RAD_REGLER, men reglerna får hela Sidanalysen och handlar om
+#  samspelet mellan annonserna. Lägg till egna med @sidregel(prioritet).
+#
+# ══════════════════════════════════════════════════════════════════════════════
+
+SIDRAD_REGLER: list[tuple[int, object]] = []
+
+
+def sidregel(prioritet: int):
+    def dekorator(fn):
+        SIDRAD_REGLER.append((prioritet, fn))
+        return fn
+
+    return dekorator
+
+
+@sidregel(100)
+def sidrad_sidbudget(s: Sidanalys) -> list[Rad]:
+    n = len(s.poster)
+    if not n:
+        return []
+    budget = n * IAB_INITIAL
+    unik = s.delad_vikt
+    if unik <= budget:
+        return []
+    varsta = max(s.poster, key=lambda p: p[1].totalvikt)
+    return [
+        Rad(
+            rubrik=f"Sidans annonser väger {fmt(unik)} — {fmt(unik - budget)} över budget",
+            varfor=(
+                f"{antal(n, 'annons', 'annonser')} på sidan ger en budget på {fmt(budget)} "
+                f"({n} × {fmt(IAB_INITIAL)}). Besökaren betalar {fmt(unik)} bara för annonserna, "
+                "utöver sidans eget innehåll."
+            ),
+            gor=[
+                f"Börja med den tyngsta: {varsta[0].id} väger {fmt(varsta[1].totalvikt)} "
+                f"(betyg {satt_betyg(varsta[1].totalvikt)[0]}).",
+                "Råden per annons längre ned visar exakt var vikten sitter.",
+                "Sätt ett tak i annonsvillkoren — annonsörer levererar det de får leverera.",
+            ],
+            sparar=0,
+            allvar="kritisk" if unik > 2 * budget else "hög",
+        )
+    ]
+
+
+@sidregel(90)
+def sidrad_lat_ladda(s: Sidanalys) -> list[Rad]:
+    under = [(f, a) for f, a, _ in s.poster if f.topp_px and not f.ovanfor_veck]
+    if not under:
+        return []
+    vikt = sum(a.totalvikt for _, a in under)
+    return [
+        Rad(
+            rubrik=f"Skjut upp {antal(len(under), 'annons', 'annonser')} som ligger under vecket",
+            varfor=(
+                f"{fmt(vikt)} laddas direkt fast annonserna sitter längre ned på sidan och "
+                "många besökare aldrig scrollar dit. Vikten konkurrerar med sidans eget "
+                "innehåll om bandbredden i det ögonblick det spelar mest roll."
+            ),
+            gor=[
+                "Sätt `loading=\"lazy\"` på annonsens iframe — det räcker långt och kostar "
+                "ingen utveckling.",
+                "Vill du ha mer kontroll: låt en IntersectionObserver skjuta in annonskoden "
+                "när platsen närmar sig visningsytan.",
+            ]
+            + [
+                f"Berör: {f.id} på {f.topp_px} px ned ({fmt(a.totalvikt)})"
+                for f, a in under
+            ],
+            sparar=vikt,
+            allvar="hög" if vikt > 300 * KB else "medel",
+        )
+    ]
+
+
+@sidregel(85)
+def sidrad_tung_ovanfor_veck(s: Sidanalys) -> list[Rad]:
+    tunga = [(f, a) for f, a, _ in s.poster if f.ovanfor_veck and a.totalvikt > IAB_INITIAL]
+    if not tunga:
+        return []
+    return [
+        Rad(
+            rubrik=f"{antal(len(tunga), 'annons', 'annonser')} ovanför vecket är tyngre än budget",
+            varfor=(
+                "Annonser i första skärmbilden laddas samtidigt som sidans huvudinnehåll och "
+                "drar ut på tiden till största innehållselementet ritas (LCP). Det är det "
+                "måttet Google väger in i sökresultaten."
+            ),
+            gor=[
+                f"{f.id} ({f.format} px) väger {fmt(a.totalvikt)} — budget är {fmt(IAB_INITIAL)}."
+                for f, a in tunga
+            ]
+            + [
+                "Ska en tung annons ligga högst upp bör den åtminstone vara statisk bild "
+                "i första bildrutan, med animation och typsnitt efterladdade.",
+            ],
+            sparar=0,
+            allvar="hög",
+        )
+    ]
+
+
+@sidregel(80)
+def sidrad_typsnittsberg(s: Sidanalys) -> list[Rad]:
+    if not s.poster:
+        return []
+    unika: dict[str, int] = {}
+    familjer: set = set()
+    for _, analys, _ in s.poster:
+        familjer |= analys.typsnitt_laddade
+        for r in analys.resurser:
+            if r.kategori == "typsnitt":
+                unika.setdefault(r.url, r.storlek)
+    vikt = sum(unika.values())
+    if vikt < 150 * KB:
+        return []
+    return [
+        Rad(
+            rubrik=f"Typsnitten är sidans tyngsta annonspost: {fmt(vikt)}",
+            varfor=(
+                f"Annonserna hämtar tillsammans {antal(len(unika), 'typsnittsfil', 'typsnittsfiler')} "
+                f"i {antal(len(familjer), 'familj', 'familjer')}: {', '.join(sorted(familjer))}. "
+                "Varje familj är en egen nedladdning som ingen besökare lägger märke till."
+            ),
+            gor=[
+                "Kom överens med annonsörerna om ett par tillåtna snitt — då delar annonserna "
+                "nedladdning och sidan betalar för dem en gång.",
+                "Kräv woff2 med subsetting i annonsvillkoren; det är den enskilt största "
+                "besparingen och kostar inget i utseende.",
+                "Ligger annonserna hos samma leverantör kan snitten cachas gemensamt om de "
+                "hämtas från samma URL:er.",
+            ],
+            sparar=0,
+            allvar="hög" if vikt > 400 * KB else "medel",
+        )
+    ]
+
+
+@sidregel(70)
+def sidrad_ingen_delning(s: Sidanalys) -> list[Rad]:
+    if len(s.poster) < 2 or s.vinst_av_delning > 20 * KB:
+        return []
+    return [
+        Rad(
+            rubrik="Annonserna delar nästan inga resurser",
+            varfor=(
+                f"Sidans {len(s.poster)} annonser återanvänder bara {fmt(s.vinst_av_delning)} "
+                "mellan sig. Varje annons drar med sig sina egna kopior av bibliotek och "
+                "typsnitt, trots att de ligger på samma sida."
+            ),
+            gor=[
+                "Låt annonserna hämta gemensamma delar från samma URL:er — då räcker en "
+                "nedladdning för hela sidan.",
+                "Det gäller särskilt animationsbiblioteket och typsnitten.",
+            ],
+            sparar=0,
+            allvar="medel",
+        )
+    ]
+
+
+def samla_sidrad(s: Sidanalys) -> list[Rad]:
+    rad: list[Rad] = []
+    for _prio, fn in sorted(SIDRAD_REGLER, key=lambda x: -x[0]):
+        try:
+            rad.extend(fn(s) or [])
+        except Exception as fel:
+            s.varningar.append(f"sidregeln {fn.__name__} kraschade: {fel}")
+    rad.sort(key=lambda r: (-r.sparar, r.valfritt))
+    return rad
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SIDRAPPORT I TERMINALEN
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def skriv_sidrapport(s: Sidanalys, visa_alla: bool) -> None:
+    W = 78
+    p = print
+    p("")
+    p("═" * W)
+    p(f"  SIDANALYS · {s.url}")
+    p("═" * W)
+    p(f"  Mätt       : {s.tidpunkt} · {antal(s.varv, 'varv', 'varv')}")
+    if s.poster:
+        p(
+            "  Rotation   : "
+            + (
+                "stabil — samma annonser i varje varv"
+                if s.stabil
+                else f"platsen visade olika annonser mellan varven"
+            )
+        )
+    if s.samtyckesknapp:
+        p(f"  Samtycke   : klickade {s.samtyckesknapp}")
+    elif s.banderoll_sedd:
+        p("  Samtycke   : banderoll upptäcktes men ingen knapp för att tillåta allt hittades")
+    if s.sidhojd:
+        p(f"  Sidhöjd    : {s.sidhojd} px")
+    p(f"  Annonser   : {antal(len(s.poster), 'BannerBoo-annons', 'unika BannerBoo-annonser')}")
+
+    if not s.poster:
+        p("")
+        p("  Inga BannerBoo-annonser hittades på sidan.")
+        if s.banderoll_sedd and not s.samtyckesknapp:
+            p("  En samtyckesbanderoll syntes — annonserna kan vara spärrade bakom den.")
+        p("  Menade du att mäta URL:en som en annons i sig? Kör med --annons.")
+        for v in s.varningar:
+            p(f"  varning: {v}")
+        p("")
+        return
+
+    # ── Annonserna ───────────────────────────────────────────────────────────
+    p("")
+    p("  ANNONSER PÅ SIDAN")
+    p("  " + "─" * (W - 4))
+    p(f"  {'Id':<16}{'Visas som':<11}{'Annonsplats':<21}{'Vikt':>10} {'Betyg':>6} {'Varv':>5}")
+    for fynd, analys, _ in s.poster:
+        plats = (fynd.plats or "—")[:20]
+        varv = f"{len(fynd.varv_sedd)}/{s.varv}"
+        p(
+            f"  {fynd.id:<16}{fynd.format:<11}{plats:<21}"
+            f"{fmt(analys.totalvikt):>10} {satt_betyg(analys.totalvikt)[0]:>6} {varv:>5}"
+        )
+        lage = (
+            "ovanför vecket"
+            if fynd.ovanfor_veck
+            else f"{fynd.topp_px} px ned på sidan"
+        )
+        p(f"  {'':<16}{lage}")
+    p("  " + "─" * (W - 4))
+    p(f"  {'Summa var för sig':<48}{fmt(s.summa_var_for_sig):>10}")
+    p(f"  {'Faktisk kostnad för besökaren':<48}{fmt(s.delad_vikt):>10}")
+    p(f"  {'Vinst av delade resurser':<48}{fmt(s.vinst_av_delning):>10}")
+
+    # ── Delade filer ─────────────────────────────────────────────────────────
+    _unik, delade = s.delning()
+    if delade:
+        p("")
+        p("  DELADE FILER — hämtas en gång, används av flera annonser")
+        p("  " + "─" * (W - 4))
+        for url, storlek, antal_annonser in delade[: (99 if visa_alla else 8)]:
+            namn = [d for d in urllib.parse.urlparse(url).path.split("/") if d]
+            namn = (namn[-1] if namn else url)[:40]
+            p(f"  {namn:<42}{fmt(storlek):>10}   {antal_annonser} annonser")
+
+    # ── Sidnivåråd ───────────────────────────────────────────────────────────
+    if s.sidrad:
+        p("")
+        p("═" * W)
+        p("  RÅD FÖR SIDAN SOM HELHET")
+        p("═" * W)
+        marke = {"kritisk": "!!!", "hög": "!! ", "medel": "!  ", "låg": "   "}
+        for i, r in enumerate(s.sidrad, 1):
+            vinst = f"−{fmt(r.sparar)}" if r.sparar else "—"
+            p("")
+            p(f"  {i}. {marke.get(r.allvar, '   ')} {r.rubrik}   [{vinst}]")
+            p(f"      {r.varfor}")
+            for steg in r.gor:
+                p(f"      · {steg}")
+
+    for v in s.varningar:
+        p(f"\n  varning: {v}")
+
+    # ── Varje annons för sig ─────────────────────────────────────────────────
+    for fynd, analys, rad in s.poster:
+        p("")
+        p("")
+        p("█" * W)
+        p(f"  ANNONS {fynd.id}   ·   {fynd.format} px   ·   {fynd.plats or 'okänd plats'}")
+        p("█" * W)
+        skriv_rapport(analys, rad, visa_alla)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SIDRAPPORT SOM HTML
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def html_sidrapport(s: Sidanalys) -> str:
+    e = lambda x: htmlmod.escape(str(x))
+    farger = {"A": "var(--a)", "B": "var(--b)", "C": "var(--c)", "D": "var(--d)", "F": "var(--f)"}
+    u = ["<h1>Annonsvikt — hela sidan</h1>"]
+
+    rader = [antal(s.varv, "varv", "varv")]
+    if s.poster:
+        rader.append(
+            "stabilt annonsval" if s.stabil else "olika annonser mellan varven"
+        )
+    if s.samtyckesknapp:
+        rader.append(f"samtycke: klickade {s.samtyckesknapp}")
+    elif s.banderoll_sedd:
+        rader.append("samtyckesbanderoll upptäckt, ingen tillåt-allt-knapp hittad")
+    u.append(
+        f'<div class="meta"><a href="{e(s.url)}">{e(s.url)}</a><br>'
+        f"Mätt {e(s.tidpunkt)} · {e(' · '.join(rader))}</div>"
+    )
+
+    if not s.poster:
+        u.append(
+            "<div class='kort'><b>Inga BannerBoo-annonser hittades på sidan.</b><br>"
+            + (
+                "En samtyckesbanderoll syntes — annonserna kan vara spärrade bakom den."
+                if s.banderoll_sedd and not s.samtyckesknapp
+                else "Menade du att mäta URL:en som en annons i sig? Kör med <code>--annons</code>."
+            )
+            + "</div>"
+        )
+        return HTML_MALL.replace("__KALLA__", e(s.url)).replace("__INNEHALL__", "\n".join(u))
+
+    u.append("<div class='kort sidkort'>")
+    u.append(
+        f"<div><div class='varfor'>Annonser på sidan</div>"
+        f"<div class='stor'>{len(s.poster)}</div></div>"
+    )
+    u.append(
+        f"<div><div class='varfor'>Summa var för sig</div>"
+        f"<div class='stor'>{e(fmt(s.summa_var_for_sig))}</div></div>"
+    )
+    u.append(
+        f"<div><div class='varfor'>Faktisk kostnad för besökaren</div>"
+        f"<div class='stor'>{e(fmt(s.delad_vikt))}</div>"
+        f"<div class='delad'>−{e(fmt(s.vinst_av_delning))} genom delade resurser</div></div>"
+    )
+    u.append("</div>")
+
+    u.append("<h2>Annonserna</h2><div class='kort'><table>")
+    u.append(
+        "<tr><th>Id</th><th>Visas som</th><th>Annonsplats</th><th>Läge</th>"
+        "<th class='n'>Vikt</th><th class='n'>Betyg</th><th class='n'>Varv</th></tr>"
+    )
+    for fynd, analys, _ in s.poster:
+        bok = satt_betyg(analys.totalvikt)[0]
+        lage = "ovanför vecket" if fynd.ovanfor_veck else f"{fynd.topp_px} px ned"
+        u.append(
+            f"<tr><td><a href='#annons-{e(fynd.id)}'>{e(fynd.id)}</a></td>"
+            f"<td>{e(fynd.format)}</td><td>{e(fynd.plats or '—')}</td><td>{e(lage)}</td>"
+            f"<td class='n'>{e(fmt(analys.totalvikt))}</td>"
+            f"<td class='n'><span class='btg' style='background:{farger[bok]}'>{bok}</span></td>"
+            f"<td class='n'>{len(fynd.varv_sedd)}/{s.varv}</td></tr>"
+        )
+    u.append("</table></div>")
+
+    _unik, delade = s.delning()
+    if delade:
+        u.append("<h2>Delade filer</h2><div class='kort'><table>")
+        u.append("<tr><th>Fil</th><th class='n'>Vikt</th><th class='n'>Annonser</th></tr>")
+        for url, storlek, antal_annonser in delade[:20]:
+            namn = [d for d in urllib.parse.urlparse(url).path.split("/") if d]
+            u.append(
+                f"<tr><td><span title='{e(url)}'>{e(namn[-1] if namn else url)}</span></td>"
+                f"<td class='n'>{e(fmt(storlek))}</td>"
+                f"<td class='n'>{antal_annonser}</td></tr>"
+            )
+        u.append("</table></div>")
+
+    if s.sidrad:
+        u.append("<h2>Råd för sidan som helhet</h2>")
+        for i, r in enumerate(s.sidrad, 1):
+            vinst = f"<span class='vinst'>−{e(fmt(r.sparar))}</span>" if r.sparar else ""
+            steg = "".join(f"<li>{e(x)}</li>" for x in r.gor)
+            u.append(
+                f"<div class='rad {r.allvar}'><h3>{i}. {e(r.rubrik)}{vinst}</h3>"
+                f"<div class='varfor'>{e(r.varfor)}</div><ul>{steg}</ul></div>"
+            )
+
+    for fynd, analys, rad in s.poster:
+        u.append(f"<div id='annons-{e(fynd.id)}'></div>")
+        u.extend(
+            html_innehall(
+                analys,
+                rad,
+                rubrik=f"Annons {fynd.id} · {fynd.format} px · {fynd.plats or 'okänd plats'}",
+            )
+        )
+
+    u.append(FOTNOT)
+    return HTML_MALL.replace("__KALLA__", e(s.url)).replace("__INNEHALL__", "\n".join(u))
+
+
+def sida_till_dict(s: Sidanalys) -> dict:
+    """Sidanalysen som JSON-vänlig struktur."""
+    _unik, delade = s.delning()
+    return {
+        "sida": s.url,
+        "tidpunkt": s.tidpunkt,
+        "varv": s.varv,
+        "samtyckesknapp": s.samtyckesknapp,
+        "banderoll_sedd": s.banderoll_sedd,
+        "sidhojd": s.sidhojd,
+        "antal_annonser": len(s.poster),
+        "summa_var_for_sig": s.summa_var_for_sig,
+        "delad_vikt": s.delad_vikt,
+        "vinst_av_delning": s.vinst_av_delning,
+        "delade_filer": [
+            {"url": url, "storlek": storlek, "annonser": n} for url, storlek, n in delade
+        ],
+        "sidrad": [asdict(r) for r in s.sidrad],
+        "varningar": s.varningar,
+        "annonser": [
+            {
+                "fynd": {**asdict(f), "varv_sedd": sorted(f.varv_sedd)},
+                "matning": analys_till_dict(analys, rad),
+            }
+            for f, analys, rad in s.poster
+        ],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CLI
+# ══════════════════════════════════════════════════════════════════════════════
 
 
 def satt_utdata_utf8() -> None:
@@ -1472,13 +2315,18 @@ def satt_utdata_utf8() -> None:
 def main() -> None:
     satt_utdata_utf8()
     ap = argparse.ArgumentParser(
-        description="Mäter vikten på en display-annons och ger råd om hur den kan bantas.",
+        description=(
+            "Mäter vikten på display-annonser och ger råd om hur de kan bantas. "
+            "Peka på en enskild annons, eller på en sida — då hittas alla "
+            "BannerBoo-annonser på sidan och mäts var för sig."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Exempel:\n"
-        "  python annonsvikt.py https://embed.bannerboo.com/b990849fd8c4b\n"
-        "  python annonsvikt.py b990849fd8c4b --html rapport.html --alla\n",
+        "  python annonsvikt.py b990849fd8c4b\n"
+        "  python annonsvikt.py upphandling24.se --varv 3 --html sida.html\n"
+        "  python annonsvikt.py https://upphandling24.se/debatt/ --utan-samtycke\n",
     )
-    ap.add_argument("url", nargs="+", help="en eller flera annons-URL:er (eller BannerBoo-id)")
+    ap.add_argument("url", nargs="+", help="annons-URL, BannerBoo-id, eller en sida att skanna")
     ap.add_argument("--vantetid", type=float, default=12.0, help="sekunder att låta annonsen rulla (standard 12)")
     ap.add_argument("--alla", action="store_true", help="lista alla filer, inte bara de tyngsta")
     ap.add_argument("--html", metavar="FIL", help="skriv en HTML-rapport")
@@ -1488,19 +2336,42 @@ def main() -> None:
     ap.add_argument("--bredd", type=int, default=1200, help="fönsterbredd")
     ap.add_argument("--hojd", type=int, default=800, help="fönsterhöjd")
     ap.add_argument("--tyst", action="store_true", help="inga statusrader")
+    ap.add_argument(
+        "--varv", type=int, default=3,
+        help="antal omladdningar av sidan för att fånga roterande annonser (standard 3)",
+    )
+    ap.add_argument("--sida", action="store_true", help="tvinga sidskanning")
+    ap.add_argument("--annons", action="store_true", help="tvinga mätning av URL:en som en annons")
+    ap.add_argument(
+        "--utan-samtycke", dest="utan_samtycke", action="store_true",
+        help="klicka inte i samtyckesbanderollen (visar vad en besökare som inte godkänner får)",
+    )
     args = ap.parse_args()
 
-    resultat = []
+    resultat = []  # enskilda annonser
+    sidor = []  # sidanalyser
     for i, rå in enumerate(args.url):
         url = normalisera_url(rå)
+        # Läget avgörs av värden, om inget annat sägs: bannerboo.com är en annons,
+        # allt annat är en sida att skanna.
+        som_annons = args.annons or (not args.sida and ar_annonslank(url))
         if not args.tyst:
-            print(f"[{i + 1}/{len(args.url)}] mäter {url}", file=sys.stderr)
-        a, rad, bild = analysera(url, args)
-        skriv_rapport(a, rad, args.alla)
-        resultat.append((a, rad, bild))
+            vad = "mäter annons" if som_annons else "skannar sida"
+            print(f"[{i + 1}/{len(args.url)}] {vad} {url}", file=sys.stderr)
+        if som_annons:
+            a, rad, bild = analysera(url, args)
+            skriv_rapport(a, rad, args.alla)
+            resultat.append((a, rad, bild))
+        else:
+            sidanalys = analysera_sida(url, args)
+            skriv_sidrapport(sidanalys, args.alla)
+            sidor.append(sidanalys)
+            resultat.extend((a, rad, None) for _f, a, rad in sidanalys.poster)
 
     if args.html:
-        if len(resultat) == 1:
+        if sidor:
+            text = "\n<hr>\n".join(html_sidrapport(sa) for sa in sidor)
+        elif len(resultat) == 1:
             text = html_rapport(*resultat[0][:2])
         else:
             text = "\n<hr>\n".join(html_rapport(a, r) for a, r, _ in resultat)
@@ -1509,18 +2380,12 @@ def main() -> None:
         print(f"HTML-rapport skriven: {args.html}", file=sys.stderr)
 
     if args.json:
-        ut = []
-        for a, rad, _ in resultat:
-            d = asdict(a)
-            d["typsnitt_laddade"] = sorted(a.typsnitt_laddade)
-            d["animationstyper"] = sorted(a.animationstyper)
-            d["totalvikt"] = a.totalvikt
-            d["potentialvikt"] = a.potentialvikt
-            d["betyg"] = satt_betyg(a.totalvikt)[0]
-            d["rad"] = [asdict(r) for r in rad]
-            ut.append(d)
+        if sidor:
+            ut = [sida_till_dict(sa) for sa in sidor]
+        else:
+            ut = [analys_till_dict(a, rad) for a, rad, _ in resultat]
         with open(args.json, "w", encoding="utf-8") as f:
-            json.dump(ut if len(ut) > 1 else ut[0], f, ensure_ascii=False, indent=2)
+            json.dump(ut if len(ut) > 1 else (ut[0] if ut else {}), f, ensure_ascii=False, indent=2)
         print(f"JSON skriven: {args.json}", file=sys.stderr)
 
     if args.bild and resultat and resultat[0][2]:
@@ -1530,7 +2395,7 @@ def main() -> None:
 
     if len(resultat) > 1:
         print("\n" + "═" * 78)
-        print("  JÄMFÖRELSE")
+        print("  JÄMFÖRELSE — ALLA MÄTTA ANNONSER")
         print("═" * 78)
         print(f"  {'Annons':<44}{'Vikt':>12}  {'Betyg':>6}  {'Möjlig':>10}")
         for a, rad, _ in sorted(resultat, key=lambda x: -x[0].totalvikt):

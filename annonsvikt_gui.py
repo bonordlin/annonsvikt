@@ -127,13 +127,16 @@ class Annonsviktsfonster(tk.Tk):
         ram = ttk.Frame(self, padding=(16, 14, 16, 8))
         ram.pack(fill="x")
 
-        ttk.Label(ram, text="Annonslänk eller BannerBoo-id", style="Svag.TLabel").grid(
+        ttk.Label(
+            ram, text="Annonslänk, BannerBoo-id eller en sida att skanna", style="Svag.TLabel"
+        ).grid(
             row=0, column=0, sticky="w", columnspan=2
         )
 
         self.falt = ttk.Entry(ram, font=("Segoe UI", 11))
         self.falt.grid(row=1, column=0, sticky="ew", pady=(3, 0), ipady=4)
         self.falt.insert(0, forifylld or "https://embed.bannerboo.com/")
+        self.falt.select_range(0, "end")
         ram.columnconfigure(0, weight=1)
 
         self.knapp_mat = ttk.Button(
@@ -152,13 +155,22 @@ class Annonsviktsfonster(tk.Tk):
         ).pack(side="left", padx=6)
         ttk.Label(val, text="sekunder", style="Svag.TLabel").pack(side="left")
 
+        ttk.Label(val, text="Varv vid sidskanning", style="Svag.TLabel").pack(
+            side="left", padx=(20, 0)
+        )
+        self.varv = tk.StringVar(value="3")
+        tk.Spinbox(
+            val, from_=1, to=10, width=3, textvariable=self.varv,
+            font=BRODTEXT, relief="solid", borderwidth=1, highlightthickness=0,
+        ).pack(side="left", padx=6)
+
         self.visa_webblasare = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            val, text="Visa webbläsarfönstret", variable=self.visa_webblasare
-        ).pack(side="left", padx=(24, 0))
+            val, text="Visa webbläsaren", variable=self.visa_webblasare
+        ).pack(side="left", padx=(18, 0))
 
-        ttk.Label(val, text="Tidigare mätningar:", style="Svag.TLabel").pack(side="left", padx=(24, 6))
-        self.historik = ttk.Combobox(val, state="readonly", width=34, font=("Segoe UI", 9))
+        ttk.Label(val, text="Resultat:", style="Svag.TLabel").pack(side="left", padx=(20, 6))
+        self.historik = ttk.Combobox(val, state="readonly", width=32, font=("Segoe UI", 9))
         self.historik.pack(side="left")
         self.historik.bind("<<ComboboxSelected>>", self._byt_matning)
 
@@ -284,11 +296,19 @@ class Annonsviktsfonster(tk.Tk):
         except ValueError:
             vantetid = 12.0
 
+        try:
+            varv = max(1, int(self.varv.get()))
+        except ValueError:
+            varv = 3
+
         url = av.normalisera_url(rå)
+        som_annons = av.ar_annonslank(url)
         self.korr = True
         self._satt_knapplage()
         self.progress.start(12)
-        self.status.configure(text=f"Mäter {url} … laddar i webbläsaren")
+        self.status.configure(
+            text=(f"Mäter {url} …" if som_annons else f"Skannar {url} efter annonser …")
+        )
 
         args = SimpleNamespace(
             vantetid=vantetid,
@@ -296,14 +316,21 @@ class Annonsviktsfonster(tk.Tk):
             bredd=1200,
             hojd=800,
             tyst=True,
+            varv=varv,
+            utan_samtycke=False,
         )
-        threading.Thread(target=self._matarbete, args=(url, args), daemon=True).start()
+        threading.Thread(
+            target=self._matarbete, args=(url, args, som_annons), daemon=True
+        ).start()
 
-    def _matarbete(self, url: str, args) -> None:
+    def _matarbete(self, url: str, args, som_annons: bool) -> None:
         """Körs i egen tråd — Playwright blockerar, gränssnittet får inte frysa."""
         try:
-            analys, rad, bild = av.analysera(url, args)
-            self.ko.put(("klar", (analys, rad, bild)))
+            if som_annons:
+                analys, rad, bild = av.analysera(url, args)
+                self.ko.put(("annons", ("annons", analys, rad, bild)))
+            else:
+                self.ko.put(("sida", ("sida", av.analysera_sida(url, args), None, None)))
         except Exception as fel:  # nätverk, tidsgräns, saknad webbläsare …
             self.ko.put(("fel", f"{type(fel).__name__}: {fel}"))
 
@@ -311,8 +338,14 @@ class Annonsviktsfonster(tk.Tk):
         try:
             while True:
                 sort, nyttolast = self.ko.get_nowait()
-                if sort == "klar":
-                    self._visa_resultat(nyttolast)
+                if sort == "annons":
+                    self._visa_resultat([nyttolast])
+                elif sort == "sida":
+                    sidanalys = nyttolast[1]
+                    poster = [nyttolast] + [
+                        ("annons", analys, rad, None) for _f, analys, rad in sidanalys.poster
+                    ]
+                    self._visa_resultat(poster)
                 elif sort == "fel":
                     self.korr = False
                     self.progress.stop()
@@ -325,24 +358,34 @@ class Annonsviktsfonster(tk.Tk):
 
     # ── Presentation ──────────────────────────────────────────────────────────
 
-    def _visa_resultat(self, resultat: tuple) -> None:
+    def _visa_resultat(self, poster: list) -> None:
         self.korr = False
         self.progress.stop()
-        self.matningar.append(resultat)
-        namn = [a.kalla.replace("https://", "") for a, _, _ in self.matningar]
-        self.historik.configure(values=namn)
-        self.historik.current(len(namn) - 1)
-        self._rita(resultat)
+        forsta = len(self.matningar)
+        self.matningar.extend(poster)
+        self.historik.configure(values=[self._etikett(p) for p in self.matningar])
+        self.historik.current(forsta)
+        self._rita(self.matningar[forsta])
         self._satt_knapplage()
+
+    @staticmethod
+    def _etikett(post) -> str:
+        if post[0] == "sida":
+            s = post[1]
+            return f"◆ SIDAN {s.url.replace('https://', '')} ({len(s.poster)} annonser)"
+        return "   " + post[1].kalla.replace("https://embed.bannerboo.com/", "")
 
     def _byt_matning(self, _händelse=None) -> None:
         i = self.historik.current()
         if 0 <= i < len(self.matningar):
             self._rita(self.matningar[i])
 
-    def _rita(self, resultat: tuple) -> None:
-        analys, rad, bild = resultat
-        self.aktiv = resultat
+    def _rita(self, post: tuple) -> None:
+        self.aktiv = post
+        if post[0] == "sida":
+            self._rita_sida(post[1])
+            return
+        _sort, analys, rad, bild = post
 
         bokstav, motivering = av.satt_betyg(analys.totalvikt)
         self.betygsruta.configure(text=bokstav, bg=BETYGSFARG[bokstav])
@@ -394,6 +437,83 @@ class Annonsviktsfonster(tk.Tk):
             ttk.Label(self.kategoriram, text=text, font=stil, anchor="e", width=11 if kol == 2 else 8).grid(
                 row=r, column=kol, sticky="e", padx=(6, 0)
             )
+
+    def _rita_sida(self, s) -> None:
+        """Sammanfattning av en hel sida: annonserna, delade filer och sidnivåråd."""
+        betyg = [av.satt_betyg(a.totalvikt)[0] for _f, a, _r in s.poster]
+        varst = max(betyg, key="ABCDF".index) if betyg else "A"
+        self.betygsruta.configure(text=varst if s.poster else "–",
+                                  bg=BETYGSFARG.get(varst, LINJE))
+        self.etikett_vikt.configure(text=av.fmt(s.delad_vikt) if s.poster else "Inga annonser")
+        self.etikett_motiv.configure(
+            text=(
+                f"{av.antal(len(s.poster), 'BannerBoo-annons', 'BannerBoo-annonser')} på sidan"
+                if s.poster
+                else "Inga BannerBoo-annonser hittades på sidan"
+            )
+        )
+        delar = [av.antal(s.varv, "varv", "varv")]
+        if s.poster:
+            delar.append("stabilt annonsval" if s.stabil else "olika annonser mellan varven")
+        if s.samtyckesknapp:
+            delar.append("samtycke klickat")
+        self.etikett_format.configure(text="  ·  ".join(delar))
+        self.etikett_prognos.configure(
+            text=(
+                "Summa var för sig\n"
+                f"{av.fmt(s.summa_var_for_sig)}\n"
+                f"delade resurser sparar {av.fmt(s.vinst_av_delning)}"
+            )
+            if len(s.poster) > 1
+            else ""
+        )
+        self.status.configure(text=f"Klar · {s.url} · mätt {s.tidpunkt}")
+
+        # Översikt: en rad per annons
+        for barn in self.kategoriram.winfo_children():
+            barn.destroy()
+        self.kategoriram.columnconfigure(0, weight=1)
+        total = s.delad_vikt or 1
+        self._kategorirad(0, "Annons", None, "Vikt", "Andel", "Betyg", fet=True)
+        for i, (fynd, analys, _rad) in enumerate(s.poster, 1):
+            lage = "ovanför vecket" if fynd.ovanfor_veck else f"{fynd.topp_px} px ned"
+            self._kategorirad(
+                i,
+                f"{fynd.id}   {fynd.plats or ''}  ({lage})",
+                analys.totalvikt / total,
+                av.fmt(analys.totalvikt),
+                av.procent(analys.totalvikt, total),
+                av.satt_betyg(analys.totalvikt)[0],
+            )
+        if s.poster:
+            rad_nr = len(s.poster) + 1
+            ttk.Separator(self.kategoriram, orient="horizontal").grid(
+                row=rad_nr, column=0, columnspan=5, sticky="ew", pady=6
+            )
+            self._kategorirad(
+                rad_nr + 1, "Faktisk kostnad för besökaren", None,
+                av.fmt(s.delad_vikt), "100 %", "", fet=True,
+            )
+        self.bildyta.configure(image="", text="sidöversikt", width=34, height=10)
+        self._bild = None
+
+        # Filer: de som delas mellan annonserna
+        self.trad_filer.delete(*self.trad_filer.get_children())
+        _unik, delade = s.delning()
+        for url, storlek, antal_annonser in delade:
+            namn = [d for d in url.split("?")[0].split("/") if d]
+            self.trad_filer.insert(
+                "", "end", text=(namn[-1] if namn else url)[:44], iid=url,
+                values=("delad", av.fmt(storlek), "",
+                        f"hämtas en gång, används av {antal_annonser} annonser"),
+            )
+        if not delade:
+            self.trad_filer.insert(
+                "", "end", text="—", values=("", "", "", "inga filer delas mellan annonserna")
+            )
+
+        self._rita_rad(s.sidrad)
+        self.flikar.select(0)
 
     def _rita_kategorier(self, analys) -> None:
         for barn in self.kategoriram.winfo_children():
@@ -508,7 +628,6 @@ class Annonsviktsfonster(tk.Tk):
     def spara_html(self) -> None:
         if not self.aktiv:
             return
-        analys, rad, _ = self.aktiv
         stig = filedialog.asksaveasfilename(
             defaultextension=".html", initialfile="rapport.html",
             filetypes=[("HTML-rapport", "*.html")],
@@ -516,29 +635,27 @@ class Annonsviktsfonster(tk.Tk):
         if not stig:
             return
         with open(stig, "w", encoding="utf-8") as f:
-            f.write(av.html_rapport(analys, rad))
+            if self.aktiv[0] == "sida":
+                f.write(av.html_sidrapport(self.aktiv[1]))
+            else:
+                f.write(av.html_rapport(self.aktiv[1], self.aktiv[2]))
         self.status.configure(text=f"HTML-rapport sparad: {stig}")
 
     def spara_json(self) -> None:
         if not self.aktiv:
             return
         import json
-        from dataclasses import asdict
 
-        analys, rad, _ = self.aktiv
         stig = filedialog.asksaveasfilename(
             defaultextension=".json", initialfile="matning.json",
             filetypes=[("JSON", "*.json")],
         )
         if not stig:
             return
-        d = asdict(analys)
-        d["typsnitt_laddade"] = sorted(analys.typsnitt_laddade)
-        d["animationstyper"] = sorted(analys.animationstyper)
-        d["totalvikt"] = analys.totalvikt
-        d["potentialvikt"] = analys.potentialvikt
-        d["betyg"] = av.satt_betyg(analys.totalvikt)[0]
-        d["rad"] = [asdict(r) for r in rad]
+        if self.aktiv[0] == "sida":
+            d = av.sida_till_dict(self.aktiv[1])
+        else:
+            d = av.analys_till_dict(self.aktiv[1], self.aktiv[2])
         with open(stig, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
         self.status.configure(text=f"JSON sparad: {stig}")
@@ -546,11 +663,13 @@ class Annonsviktsfonster(tk.Tk):
     def oppna_rapport(self) -> None:
         if not self.aktiv:
             return
-        analys, rad, _ = self.aktiv
         katalog = tempfile.mkdtemp(prefix="annonsvikt_")
         stig = os.path.join(katalog, "rapport.html")
         with open(stig, "w", encoding="utf-8") as f:
-            f.write(av.html_rapport(analys, rad))
+            if self.aktiv[0] == "sida":
+                f.write(av.html_sidrapport(self.aktiv[1]))
+            else:
+                f.write(av.html_rapport(self.aktiv[1], self.aktiv[2]))
         webbrowser.open("file:///" + stig.replace("\\", "/"))
         self.status.configure(text=f"Rapport öppnad i webbläsaren: {stig}")
 

@@ -35,6 +35,67 @@ Tar full URL, URL utan protokoll, eller bara BannerBoo-id:t.
 | `--bild FIL` | spara en skärmbild av annonsen |
 | `--huvud` | visa webbläsarfönstret (felsökning) |
 | `--tyst` | inga statusrader |
+| `--varv N` | antal omladdningar vid sidskanning (standard 3) |
+| `--sida` / `--annons` | tvinga läge i stället för automatiskt val |
+| `--utan-samtycke` | klicka inte i samtyckesbanderollen |
+
+## Skanna en hel sida
+
+```bash
+python annonsvikt.py upphandling24.se
+python annonsvikt.py https://upphandling24.se/karriar/ --varv 5 --html sida.html
+```
+
+Peka verktyget på en sida i stället för en annons, så hittas alla BannerBoo-annonser
+på sidan och mäts var för sig. Läget väljs automatiskt: en URL hos `bannerboo.com`
+eller ett rent id mäts som annons, allt annat skannas som sida. `--annons` och
+`--sida` tvingar valet.
+
+Rapporten visar tre tal som svarar på olika frågor:
+
+| Tal | Betyder |
+|---|---|
+| Summa var för sig | vad annonserna väger om var och en mäts isolerat |
+| Faktisk kostnad för besökaren | unionen — delade filer räknas en gång |
+| Vinst av delade resurser | skillnaden, med de delade filerna namngivna |
+
+Utöver råden per annons ges råd för sidan som helhet: annonser under vecket som
+laddas direkt, annonser ovanför vecket som är tyngre än budget, sidans totala
+annonsvikt mot antal annonser × 150 kB, och typsnitten sammanräknade över alla
+annonser.
+
+### Så hittas annonserna
+
+Annonserna injiceras av JavaScript — på upphandling24.se av Advanced Ads via
+`postscribe`, och sidans HTML innehåller inte ett enda annons-id. Därför laddas
+sidan i en riktig webbläsare, som scrollas igenom så att lazy-laddade annonser
+triggas. Både nätverkstrafiken och den renderade DOM:en avsöks, vilket ger id,
+exakt laddar-URL med query, renderad storlek, position på sidan och vilken
+annonsplats annonsen sitter i.
+
+### Samtyckesbanderoll
+
+Hittas en samtyckesbanderoll klickas "tillåt allt", så att annonser inte hålls
+tillbaka. Knappen som klickades skrivs ut i rapporten. Sökningen börjar med kända
+selektorer (`.cc-allowall`, `.cc-allow`, `[class*=accept-all]` …) och faller
+tillbaka på knappar med rätt text — men bara inuti en samtyckesbehållare, så att
+verktyget inte klickar på ett "OK" någon annanstans på sidan.
+
+Varje körning sker i en webbläsarkontext som slängs efteråt, så inget samtycke
+sparas mellan körningar. `--utan-samtycke` hoppar över klicket och visar vad en
+besökare som inte godkänner får se.
+
+### Om rotation och `--varv`
+
+Sidan laddas om `--varv` gånger (standard 3) för att fånga annonsplatser som
+roterar mellan kreativ. Ger två varv i rad exakt samma annonser avbryts skanningen
+i förtid och rapporten skriver "stabilt annonsval" — då tillför fler varv bara
+väntetid.
+
+På upphandling24.se visade sig annonsvalet vara stabilt per URL: samma annons
+oavsett omladdning, session eller tom cache. Olika sidor visar däremot olika
+annonser. Vill du täcka fler annonser är det alltså flera sid-URL:er som behövs,
+inte fler varv — flera URL:er kan anges efter varandra på kommandoraden.
 
 ## Grafiskt gränssnitt
 
@@ -43,8 +104,9 @@ python annonsvikt_gui.py
 python annonsvikt_gui.py b990849fd8c4b      # förifyllt fält
 ```
 
-Ett fönster där du klistrar in länken och trycker Mät. Samma mätmotor som
-kommandoraden, ingen extra installation — tkinter ingår i Python.
+Ett fönster där du klistrar in länken och trycker Mät. Tar både en annonslänk och
+en sida att skanna, precis som kommandoraden. Samma mätmotor, ingen extra
+installation — tkinter ingår i Python.
 
 - **Betygskort** med vikt, motivering, format och prognos efter åtgärd
 - **Översikt** — vikt per del med staplar, plus en skärmbild av annonsen som
@@ -53,7 +115,8 @@ kommandoraden, ingen extra installation — tkinter ingår i Python.
   på en rad för att öppna filen i webbläsaren
 - **Råd** — samma råd som kommandoraden ger, färgade efter allvarsgrad
 - Knappar för att spara HTML-rapport och JSON, eller öppna rapporten direkt
-- Rullgardin med tidigare mätningar i samma session, för att jämföra annonser
+- Vid sidskanning fylls resultatlistan med sidan överst och en rad per annons;
+  sidposten visar annonserna, de delade filerna och sidnivåråden
 
 Mätningen körs i en egen tråd så att fönstret inte fryser medan annonsen laddas.
 
@@ -119,3 +182,12 @@ två gånger när flera råd berör samma fil.
 mätning: en 600 × 300-banner som vägde 920 kB, varav 665 kB typsnitt i
 ttf-format och 152 kB i en bild som var dold med `visibility:hidden` men
 laddades ändå.
+
+`test-tvaannonser.html` är en testsida med två BannerBoo-annonser, för att pröva
+sidskanningen och delningsmatten utan att vara beroende av vilka annonser en
+riktig sajt råkar visa:
+
+```bash
+python -m http.server 8731 &
+python annonsvikt.py http://127.0.0.1:8731/test-tvaannonser.html --varv 2
+```
