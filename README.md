@@ -64,6 +64,7 @@ Tar full URL, URL utan protokoll, eller bara BannerBoo-id:t.
 | `--bild FIL` | spara en skärmbild av annonsen |
 | `--huvud` | visa webbläsarfönstret (felsökning) |
 | `--tyst` | inga statusrader |
+| `--version` | visar vilken version som körs |
 | `--varv N` | antal omladdningar vid sidskanning (standard 3) |
 | `--sida` / `--annons` | tvinga läge i stället för automatiskt val |
 | `--utan-samtycke` | klicka inte i samtyckesbanderollen |
@@ -79,6 +80,11 @@ Peka verktyget på en sida i stället för en annons, så hittas alla BannerBoo-
 på sidan och mäts var för sig. Läget väljs automatiskt: en URL hos `bannerboo.com`
 eller ett rent id mäts som annons, allt annat skannas som sida. `--annons` och
 `--sida` tvingar valet.
+
+**Räkna med ungefär en minut per varv.** Sidan ska laddas, samtyckas, scrollas
+igenom och få tid att injicera sina annonser, och sedan mäts varje funnen annons
+för sig i en egen webbläsare med tom cache. Både kommandoraden och fönstret
+berättar löpande vad som pågår, inklusive hur många annonser som hittats.
 
 Rapporten visar tre tal som svarar på olika frågor:
 
@@ -148,7 +154,15 @@ installation — tkinter ingår i Python.
   Sidposten visar annonserna i Översikt, **varje annons samtliga filer med vikt** i
   Filer — grupperade per annons, med delade filer markerade — och sidnivåråden i Råd
 
-Mätningen körs i en egen tråd så att fönstret inte fryser medan annonsen laddas.
+Mätningen körs i en egen tråd så att fönstret inte fryser medan annonsen laddas,
+och statusraden visar varje steg: vilket varv som pågår, om samtyckesbanderollen
+klickats, när sidan scrollas, hur många annonser som hittats och vilken som mäts
+just nu.
+
+Versionsnumret står i namnlisten och längst ned i fönstret, och fås på
+kommandoraden med `annonsvikt --version`. Det finns på ett enda ställe i koden —
+`VERSION` i `annonsvikt.py` — och bygget skickar det vidare till installeraren,
+så att posten i *Appar och funktioner* alltid stämmer med det som körs.
 
 ## Så mäts vikten
 

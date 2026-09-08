@@ -100,7 +100,7 @@ def ikonsokvag() -> str:
 class Annonsviktsfonster(tk.Tk):
     def __init__(self, forifylld: str = ""):
         super().__init__()
-        self.title("Annonsvikt")
+        self.title(f"Annonsvikt {av.VERSION}")
         self.configure(bg=BG)
         ikon = ikonsokvag()
         if ikon:
@@ -335,7 +335,9 @@ class Annonsviktsfonster(tk.Tk):
         self.knapp_oppna = ttk.Button(ram, text="Öppna rapport i webbläsare", command=self.oppna_rapport)
         self.knapp_oppna.pack(side="left")
         ttk.Label(
-            ram, text="Mätt i headless Chromium med tom cache", style="Svag.TLabel"
+            ram,
+            text=f"Annonsvikt {av.VERSION}  ·  mäter i headless Chromium med tom cache",
+            style="Svag.TLabel",
         ).pack(side="right")
 
     # ── Mätning ───────────────────────────────────────────────────────────────
@@ -371,7 +373,11 @@ class Annonsviktsfonster(tk.Tk):
         self._satt_knapplage()
         self.progress.start(12)
         self.status.configure(
-            text=(f"Mäter {url} …" if som_annons else f"Skannar {url} efter annonser …")
+            text=(
+                f"Mäter {url} …"
+                if som_annons
+                else f"Skannar {url} efter annonser — det tar ungefär en minut per varv …"
+            )
         )
 
         args = SimpleNamespace(
@@ -382,6 +388,9 @@ class Annonsviktsfonster(tk.Tk):
             tyst=True,
             varv=varv,
             utan_samtycke=False,
+            # Mätmotorn ropar hit med varje steg. Tk får bara röras från
+            # huvudtråden, så beskedet läggs i kön i stället för att skrivas direkt.
+            status=lambda text: self.ko.put(("status", text)),
         )
         threading.Thread(
             target=self._matarbete, args=(url, args, som_annons), daemon=True
@@ -402,7 +411,9 @@ class Annonsviktsfonster(tk.Tk):
         try:
             while True:
                 sort, nyttolast = self.ko.get_nowait()
-                if sort == "annons":
+                if sort == "status":
+                    self.status.configure(text=nyttolast)
+                elif sort == "annons":
                     self._visa_resultat([nyttolast])
                 elif sort == "sida":
                     sidanalys = nyttolast[1]
@@ -761,7 +772,10 @@ class Annonsviktsfonster(tk.Tk):
 
     def _satt_knapplage(self) -> None:
         har = self.aktiv is not None
-        self.knapp_mat.configure(state="disabled" if self.korr else "normal", text="Mäter…" if self.korr else "Mät")
+        self.knapp_mat.configure(
+            state="disabled" if self.korr else "normal",
+            text="Arbetar…" if self.korr else "Mät",
+        )
         lage = "normal" if har and not self.korr else "disabled"
         for knapp in (self.knapp_html, self.knapp_json, self.knapp_oppna):
             knapp.configure(state=lage)

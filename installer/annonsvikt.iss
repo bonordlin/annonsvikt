@@ -11,7 +11,9 @@
 ; ═══════════════════════════════════════════════════════════════════════════
 
 #define Namn          "Annonsvikt"
-#define Version       "1.0.0"
+#ifndef Version
+  #define Version     "0.0.0"   ; sätts av bygg-installerare.cmd via /DVersion=
+#endif
 #define Utgivare      "Upphandling24"
 #define Webb          "https://github.com/bonordlin/annonsvikt"
 #define Beskrivning   "Mäter vikten på display-annonser"

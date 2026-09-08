@@ -27,9 +27,13 @@ if not defined ISCC (
     exit /b 1
 )
 
-echo   Bygger installeraren med "%ISCC%" ...
+set "VER="
+for /f "delims=" %%V in ('python verktyg\las_version.py') do set "VER=%%V"
+if not defined VER (echo   Kunde inte lasa versionsnumret ur annonsvikt.py. & exit /b 1)
+
+echo   Bygger version %VER% med "%ISCC%" ...
 echo.
-"%ISCC%" /Qp "installer\annonsvikt.iss" || (echo   Bygget misslyckades. & exit /b 1)
+"%ISCC%" /Qp /DVersion=%VER% "installer\annonsvikt.iss" || (echo   Bygget misslyckades. & exit /b 1)
 
 echo.
 echo   Klart: dist\AnnonsviktSetup.exe

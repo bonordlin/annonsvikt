@@ -30,6 +30,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
+VERSION = "1.1.0"
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  BUDGETAR OCH TRÖSKLAR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -608,6 +610,20 @@ class Analys:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def beratta(args, text: str) -> None:
+    """Löpande besked under en mätning.
+
+    Kommandoraden skriver till stderr, fönstret sätter sin statusrad. Vilket som
+    avgörs av om anroparen lagt en funktion i args.status."""
+    if args is None:
+        return
+    aterkoppling = getattr(args, "status", None)
+    if callable(aterkoppling):
+        aterkoppling(text)
+    elif not getattr(args, "tyst", False):
+        print(f"  {text}", file=sys.stderr)
+
+
 def fmt(byte: float) -> str:
     """Formaterar byte som svensk läsbar storlek."""
     b = float(byte)
@@ -781,7 +797,8 @@ async () => {
 """
 
 
-def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: int, tyst: bool):
+def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: int,
+                     tyst: bool, args=None):
     """Laddar annonsen och spelar in all nätverkstrafik. Returnerar rådata."""
     try:
         from playwright.sync_api import sync_playwright
@@ -845,7 +862,9 @@ def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: i
         else:
             mal = url
 
-        if not tyst:
+        if args is not None:
+            beratta(args, f"laddar {url} …")
+        elif not tyst:
             print(f"  laddar {url} …", file=sys.stderr)
         navfel = ""
         try:
@@ -1201,7 +1220,7 @@ def skriv_rapport(a: Analys, rad: list[Rad], visa_alla: bool) -> None:
     p = print
     p("")
     p("═" * W)
-    p(f"  ANNONSVIKT · {a.kalla}")
+    p(f"  ANNONSVIKT {VERSION} · {a.kalla}")
     p("═" * W)
 
     if a.misslyckande:
@@ -1533,7 +1552,7 @@ def html_innehall(a: Analys, rad: list[Rad], rubrik: str | None = None) -> list[
 
 
 FOTNOT = (
-    "<footer>Mätt med annonsvikt.py — riktig headless Chromium, tom cache, "
+    f"<footer>Mätt med Annonsvikt {VERSION} — riktig headless Chromium, tom cache, "
     "alla nätverkssvar inspelade. Besparingar är uppskattningar baserade på "
     "typiska konverteringsvinster.</footer>"
 )
@@ -1553,7 +1572,7 @@ def html_rapport(a: Analys, rad: list[Rad]) -> str:
 
 def analysera(url: str, args) -> tuple[Analys, list[Rad], bytes | None]:
     lage, kropp, rader, sonder, konsol, bild, navfel = mat_i_webblasare(
-        url, args.vantetid, args.huvud, args.bredd, args.hojd, args.tyst
+        url, args.vantetid, args.huvud, args.bredd, args.hojd, args.tyst, args
     )
     a = bygg_analys(url, lage, kropp, rader, sonder, konsol, navfel)
     rad = samla_rad(a)
@@ -1885,8 +1904,7 @@ def skanna_sida(url: str, args):
         sida = kontext.new_page()
 
         for varv in range(1, max(1, args.varv) + 1):
-            if not args.tyst:
-                print(f"  varv {varv}/{args.varv}: laddar {url} …", file=sys.stderr)
+            beratta(args, f"varv {varv} av {args.varv}: laddar sidan …")
             traffar.clear()
             try:
                 sida.goto(url, wait_until="load", timeout=60000)
@@ -1897,12 +1915,15 @@ def skanna_sida(url: str, args):
             if vill_samtycka:
                 # Efter första varvet ligger samtycket i en kaka och banderollen
                 # visas inte igen — då returnerar den här tomt, vilket är rätt.
+                beratta(args, f"varv {varv} av {args.varv}: söker samtyckesbanderoll …")
                 knapp, sedd = godkann_samtycke(sida)
                 banderoll = banderoll or sedd
                 if knapp and not samtyckesknapp:
                     samtyckesknapp = knapp
 
+            beratta(args, f"varv {varv} av {args.varv}: scrollar igenom sidan …")
             rulla_igenom(sida)
+            beratta(args, f"varv {varv} av {args.varv}: väntar in annonserna …")
             try:
                 sida.wait_for_load_state("networkidle", timeout=12000)
             except Exception:
@@ -1918,18 +1939,18 @@ def skanna_sida(url: str, args):
             andra_iframes.update(dom.get("andra_iframes") or [])
             samla_fynd(fynd, traffar, dom, varv)
             korda_varv = varv
+            beratta(
+                args,
+                f"varv {varv} av {args.varv}: "
+                + antal(len(fynd), "annons hittad hittills", "annonser hittade hittills"),
+            )
 
             # Ger två varv i rad exakt samma annonser roterar platsen inte, och
             # fler varv tillför ingenting utom väntetid.
             nu = {f.id for f in fynd.values() if varv in f.varv_sedd}
             if nu and nu == forra_uppsattningen:
                 stabil = True
-                if not args.tyst:
-                    print(
-                        f"  samma annonser i varv {varv - 1} och {varv} — "
-                        "annonsvalet är stabilt, avbryter",
-                        file=sys.stderr,
-                    )
+                beratta(args, "samma annonser två varv i rad — annonsvalet är stabilt")
                 break
             forra_uppsattningen = nu
 
@@ -1957,9 +1978,10 @@ def analysera_sida(url: str, args) -> Sidanalys:
         sidhojd=sidhojd,
         varningar=varningar,
     )
+    if not fynd:
+        beratta(args, "inga BannerBoo-annonser hittades på sidan")
     for i, f in enumerate(fynd, 1):
-        if not args.tyst:
-            print(f"  mäter annons {i}/{len(fynd)}: {f.id}", file=sys.stderr)
+        beratta(args, f"mäter annons {i} av {len(fynd)}: {f.id} …")
         try:
             analys, rad, _bild = analysera(f.matning_url, args)
         except Exception as fel:
@@ -2445,6 +2467,7 @@ def main() -> None:
     ap.add_argument("--bredd", type=int, default=1200, help="fönsterbredd")
     ap.add_argument("--hojd", type=int, default=800, help="fönsterhöjd")
     ap.add_argument("--tyst", action="store_true", help="inga statusrader")
+    ap.add_argument("--version", action="version", version=f"Annonsvikt {VERSION}")
     ap.add_argument(
         "--varv", type=int, default=3,
         help="antal omladdningar av sidan för att fånga roterande annonser (standard 3)",
