@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 
 SAKNAS_MEDDELANDE = (
     "Playwright saknas i den här Python-miljön.\n\n"
@@ -1652,6 +1652,7 @@ class Sidanalys:
     stabil: bool = False  # samma annonser i två varv i rad → platsen roterar inte
     andra_iframes: list = field(default_factory=list)  # värdar för iframes som inte är BannerBoo
     poster: list = field(default_factory=list)  # (Annonsfynd, Analys, list[Rad])
+    bilder: dict = field(default_factory=dict)  # annons-id → skärmbild som PNG-byte
     sidrad: list = field(default_factory=list)
     samtyckesknapp: str = ""
     banderoll_sedd: bool = False
@@ -1986,11 +1987,13 @@ def analysera_sida(url: str, args) -> Sidanalys:
     for i, f in enumerate(fynd, 1):
         beratta(args, f"mäter annons {i} av {len(fynd)}: {f.id} …")
         try:
-            analys, rad, _bild = analysera(f.matning_url, args)
+            analys, rad, bild = analysera(f.matning_url, args)
         except Exception as fel:
             s.varningar.append(f"annonsen {f.id} kunde inte mätas: {fel}")
             continue
         s.poster.append((f, analys, rad))
+        if bild:
+            s.bilder[f.id] = bild
 
     s.sidrad = samla_sidrad(s)
     return s

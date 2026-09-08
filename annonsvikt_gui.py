@@ -276,7 +276,8 @@ class Annonsviktsfonster(tk.Tk):
 
         bildram = ttk.Frame(oversikt, padding=(14, 0, 0, 0))
         bildram.pack(side="right", fill="y")
-        ttk.Label(bildram, text="Så såg annonsen ut", style="Svag.TLabel").pack(anchor="w")
+        self.bildrubrik = ttk.Label(bildram, text="Så såg annonsen ut", style="Svag.TLabel")
+        self.bildrubrik.pack(anchor="w")
         self.bildyta = tk.Label(bildram, bg=KORT, relief="solid", bd=1, text="", width=34, height=10)
         self.bildyta.pack(pady=(4, 0))
 
@@ -420,7 +421,8 @@ class Annonsviktsfonster(tk.Tk):
                 elif sort == "sida":
                     sidanalys = nyttolast[1]
                     poster = [nyttolast] + [
-                        ("annons", analys, rad, None) for _f, analys, rad in sidanalys.poster
+                        ("annons", analys, rad, sidanalys.bilder.get(fynd.id))
+                        for fynd, analys, rad in sidanalys.poster
                     ]
                     self._visa_resultat(poster)
                 elif sort == "fel":
@@ -512,6 +514,7 @@ class Annonsviktsfonster(tk.Tk):
         )
 
         self.flikar.select(0)
+        self.bildrubrik.configure(text="Så såg annonsen ut")
         self._rita_kategorier(analys)
         self._rita_filer(analys)
         self._rita_rad(rad)
@@ -622,8 +625,19 @@ class Annonsviktsfonster(tk.Tk):
                 rad_nr + 1, "Faktisk kostnad för besökaren", None,
                 av.fmt(s.delad_vikt), "100 %", "", fet=True,
             )
-        self.bildyta.configure(image="", text="sidöversikt", width=34, height=10)
-        self._bild = None
+        # Panelen visar den tyngsta annonsen; det är den råden handlar mest om.
+        tyngst = max(s.poster, key=lambda p: p[1].totalvikt, default=None)
+        bild = s.bilder.get(tyngst[0].id) if tyngst else None
+        if tyngst and bild:
+            self.bildrubrik.configure(
+                text=("Annonsen på sidan" if len(s.poster) == 1
+                      else f"Tyngsta annonsen: {tyngst[0].id}")
+            )
+            self._rita_bild(bild)
+        else:
+            self.bildrubrik.configure(text="Så såg annonsen ut")
+            self.bildyta.configure(image="", text="ingen skärmbild", width=34, height=10)
+            self._bild = None
 
         self._rita_sidfiler(s)
 
