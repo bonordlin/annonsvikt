@@ -30,7 +30,14 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
+
+SAKNAS_MEDDELANDE = (
+    "Playwright saknas i den här Python-miljön.\n\n"
+    "Kör \"Reparera Annonsvikt\" på Start-menyn, eller installera själv med:\n"
+    "    pip install playwright\n"
+    "    python -m playwright install chromium"
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  BUDGETAR OCH TRÖSKLAR
@@ -802,12 +809,10 @@ def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: i
     """Laddar annonsen och spelar in all nätverkstrafik. Returnerar rådata."""
     try:
         from playwright.sync_api import sync_playwright
-    except ImportError:
-        sys.exit(
-            "Playwright saknas. Installera med:\n"
-            "    pip install playwright\n"
-            "    python -m playwright install chromium"
-        )
+    except ImportError as fel:
+        # Aldrig sys.exit() här: anropas det från en arbetstråd blir det ett
+        # SystemExit som inte fångas av "except Exception", och tråden dör tyst.
+        raise RuntimeError(SAKNAS_MEDDELANDE) from fel
 
     # Sniffa först: är URL:en ett inbäddningsskript eller ett färdigt dokument?
     lage, forsta_kropp = sniffa(url)
@@ -1870,12 +1875,10 @@ def skanna_sida(url: str, args):
     däremot isolerat efteråt, med tom cache."""
     try:
         from playwright.sync_api import sync_playwright
-    except ImportError:
-        sys.exit(
-            "Playwright saknas. Installera med:\n"
-            "    pip install playwright\n"
-            "    python -m playwright install chromium"
-        )
+    except ImportError as fel:
+        # Aldrig sys.exit() här: anropas det från en arbetstråd blir det ett
+        # SystemExit som inte fångas av "except Exception", och tråden dör tyst.
+        raise RuntimeError(SAKNAS_MEDDELANDE) from fel
 
     fynd: dict[str, Annonsfynd] = {}
     samtyckesknapp, banderoll, sidhojd = "", False, 0
@@ -2445,6 +2448,14 @@ def satt_utdata_utf8() -> None:
 
 def main() -> None:
     satt_utdata_utf8()
+    try:
+        _main()
+    except RuntimeError as fel:
+        print(f"\n  {fel}\n", file=sys.stderr)
+        sys.exit(2)
+
+
+def _main() -> None:
     ap = argparse.ArgumentParser(
         description=(
             "Mäter vikten på display-annonser och ger råd om hur de kan bantas. "

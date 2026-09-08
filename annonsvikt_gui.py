@@ -119,6 +119,7 @@ class Annonsviktsfonster(tk.Tk):
         self.matningar: list[tuple] = []  # (analys, råd, skärmbild)
         self.aktiv: tuple | None = None
         self.korr = False
+        self._trad = None  # arbetstråden, så att en tyst död går att upptäcka
         self._bild = None  # referens så att Tk inte slänger bilden
 
         self._stil()
@@ -392,9 +393,10 @@ class Annonsviktsfonster(tk.Tk):
             # huvudtråden, så beskedet läggs i kön i stället för att skrivas direkt.
             status=lambda text: self.ko.put(("status", text)),
         )
-        threading.Thread(
+        self._trad = threading.Thread(
             target=self._matarbete, args=(url, args, som_annons), daemon=True
-        ).start()
+        )
+        self._trad.start()
 
     def _matarbete(self, url: str, args, som_annons: bool) -> None:
         """Körs i egen tråd — Playwright blockerar, gränssnittet får inte frysa."""
@@ -404,8 +406,8 @@ class Annonsviktsfonster(tk.Tk):
                 self.ko.put(("annons", ("annons", analys, rad, bild)))
             else:
                 self.ko.put(("sida", ("sida", av.analysera_sida(url, args), None, None)))
-        except Exception as fel:  # nätverk, tidsgräns, saknad webbläsare …
-            self.ko.put(("fel", f"{type(fel).__name__}: {fel}"))
+        except BaseException as fel:  # även SystemExit — annars dör tråden tyst
+            self.ko.put(("fel", str(fel) or f"{type(fel).__name__}"))
 
     def _tom_ko(self) -> None:
         try:
@@ -429,6 +431,18 @@ class Annonsviktsfonster(tk.Tk):
                     messagebox.showerror("Mätningen misslyckades", nyttolast)
         except queue.Empty:
             pass
+        # Dör arbetstråden utan att lämna något i kön skulle fönstret annars stå
+        # kvar på "Arbetar…" i all oändlighet.
+        if self.korr and self._trad is not None and not self._trad.is_alive():
+            self.korr = False
+            self.progress.stop()
+            self._satt_knapplage()
+            self.status.configure(text="Mätningen avbröts oväntat.")
+            messagebox.showerror(
+                "Annonsvikt",
+                "Mätningen avbröts utan besked.\n\n"
+                "Kör \"Reparera Annonsvikt\" på Start-menyn om det upprepas.",
+            )
         self.after(100, self._tom_ko)
 
     # ── Presentation ──────────────────────────────────────────────────────────

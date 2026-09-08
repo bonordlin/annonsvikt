@@ -108,6 +108,27 @@ function Hitta-Python {
     return $null
 }
 
+function Stang-Appen([string]$Mapp) {
+    <#  En körande Annonsvikt håller venv\Scripts\pythonw.exe öppen. Då går miljön
+        varken att radera eller bygga om, och resultatet blir en trasig mapp.  #>
+    $stangda = 0
+    foreach ($namn in @('pythonw', 'python')) {
+        foreach ($proc in Get-Process -Name $namn -ErrorAction SilentlyContinue) {
+            try {
+                $sokvag = $proc.Path
+            } catch {
+                $sokvag = $null
+            }
+            if ($sokvag -and $sokvag.StartsWith($Mapp, [StringComparison]::OrdinalIgnoreCase)) {
+                Skriv "  Stänger Annonsvikt som körs (pid $($proc.Id)) …" DarkGray
+                try { $proc.Kill(); $stangda++ } catch {}
+            }
+        }
+    }
+    if ($stangda) { Start-Sleep -Seconds 2 }
+}
+
+
 function Installera-Python {
     Rubrik 'Python saknas — installerar'
     Skriv '  Annonsvikt behöver Python för att köra. Det installeras nu.' Gray
@@ -185,7 +206,18 @@ if ($python) {
 Rubrik 'Skapar en egen Python-miljö för Annonsvikt'
 if (Test-Path $Venv) {
     Skriv '  En tidigare miljö fanns — den ersätts.' DarkGray
+    Stang-Appen $InstallDir
     Remove-Item $Venv -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $Venv) {
+        # Andra försöket, ifall filerna nyss släppts.
+        Start-Sleep -Seconds 3
+        Remove-Item $Venv -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $Venv) {
+        Avbryt ('Den gamla Python-miljön kunde inte tas bort — någon fil är låst. ' +
+                'Stäng Annonsvikt om det är öppet, och kör Reparera Annonsvikt igen. ' +
+                'Hjälper inte det, starta om datorn och försök på nytt.') 9
+    }
 }
 $argument = @()
 if ($python.Forargument) { $argument += $python.Forargument }
@@ -219,6 +251,32 @@ $kontrollfil = Join-Path $env:TEMP 'annonsvikt_kontroll.py'
 ) | Set-Content -Path $kontrollfil -Encoding UTF8
 
 Kor $VenvPython @($kontrollfil) 'Provstartar programmet'
+
+# Genvägen startar pythonw.exe, inte python.exe. Går inte den att köra hjälper
+# det inte att python.exe fungerar — då blir fönstret öppet men obrukbart.
+$VenvPythonw = Join-Path $Venv 'Scripts\pythonw.exe'
+if (-not (Test-Path $VenvPythonw)) {
+    Avbryt 'pythonw.exe saknas i miljön — genvägen skulle inte fungera.' 10
+}
+$utfall = Join-Path $env:TEMP 'annonsvikt_pythonw.txt'
+Remove-Item $utfall -ErrorAction SilentlyContinue
+$kontrollw = Join-Path $env:TEMP 'annonsvikt_kontrollw.py'
+@(
+    'import sys'
+    "sys.path.insert(0, r'$AppMapp')"
+    'import annonsvikt, annonsvikt_gui, tkinter'
+    'from playwright.sync_api import sync_playwright'
+    "open(r'$utfall', 'w').write('OK')"
+) | Set-Content -Path $kontrollw -Encoding UTF8
+Skriv '  Provstartar så som genvägen gör …' DarkGray
+$p = Start-Process -FilePath $VenvPythonw -ArgumentList $kontrollw -Wait -PassThru
+Remove-Item $kontrollw -ErrorAction SilentlyContinue
+if (-not (Test-Path $utfall)) {
+    Avbryt ('Programmet gick inte att starta med pythonw.exe, som genvägen använder. ' +
+            'Se loggen för detaljer.') 11
+}
+Remove-Item $utfall -ErrorAction SilentlyContinue
+
 Remove-Item $kontrollfil -ErrorAction SilentlyContinue
 
 Write-Host ''
