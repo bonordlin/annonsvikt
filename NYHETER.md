@@ -4,6 +4,10 @@ Punkterna under den översta rubriken som matchar `VERSION` i `annonsvikt.py`
 hamnar i `version.json` och visas i uppdateringsnotisen i programmet. Håll dem
 korta — de ska rymmas på en rad i fönstret.
 
+## 1.2.1
+
+- Fältet tar emot BannerBoos inbäddningskod rakt av, inte bara en länk
+
 ## 1.2.0
 
 - Programmet upptäcker själv när en ny version finns och installerar den på ett klick

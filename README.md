@@ -89,7 +89,15 @@ python annonsvikt.py https://embed.bannerboo.com/b990849fd8c4b --html rapport.ht
 python annonsvikt.py <url1> <url2> <url3>      # flera annonser + jämförelsetabell
 ```
 
-Tar full URL, URL utan protokoll, eller bara BannerBoo-id:t.
+Tar full URL, URL utan protokoll, bara BannerBoo-id:t — eller hela
+inbäddningskoden som BannerBoo ger dig att klistra in på sajten:
+
+```html
+<center><script src="//embed.bannerboo.com/b990849fd8c4b?responsive=1" async></script></center>
+```
+
+Adressen plockas ut ur koden, och en iframe-inbäddning översätts till laddarens
+adress, så att samma annons mäts likadant oavsett vilken form du råkat kopiera.
 
 | Flagga | Betydelse |
 |---|---|

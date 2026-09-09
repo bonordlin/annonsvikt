@@ -303,7 +303,9 @@ class Annonsviktsfonster(tk.Tk):
         self._toppram = ram  # notisen packas ovanför den här
 
         ttk.Label(
-            ram, text="Annonslänk, BannerBoo-id eller en sida att skanna", style="Svag.TLabel"
+            ram,
+            text="Annonslänk, inbäddningskod, BannerBoo-id eller en sida att skanna",
+            style="Svag.TLabel",
         ).grid(
             row=0, column=0, sticky="w", columnspan=2
         )
@@ -363,7 +365,9 @@ class Annonsviktsfonster(tk.Tk):
         self.progress = ttk.Progressbar(ram, mode="indeterminate", length=190)
         self.progress.grid(row=3, column=1, sticky="e", pady=(10, 0))
 
-    PLATSHALLARE = "t.ex. bb6a6b2536dcc  eller  upphandling24.se"
+    PLATSHALLARE = (
+        "klistra in inbäddningskoden, en länk, ett id eller en sidadress"
+    )
 
     def _visa_platshallare(self, _händelse=None) -> None:
         if not self.falt.get().strip():

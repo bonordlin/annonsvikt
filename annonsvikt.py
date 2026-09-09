@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 SAKNAS_MEDDELANDE = (
     "Playwright saknas i den här Python-miljön.\n\n"
@@ -652,13 +652,49 @@ def procent(del_: float, helhet: float) -> str:
     return f"{100 * del_ / helhet:.1f} %".replace(".", ",")
 
 
+# src= eller href= i en inbäddningskod, med eller utan citattecken.
+MONSTER_SRC = re.compile(
+    r"""(?:src|href)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))""", re.I
+)
+MONSTER_TAGG = re.compile(r"<[^>]*>")
+
+
+def _adress_ur_kod(text: str) -> str:
+    """Plockar adressen ur en inbäddningskod. Returnerar texten oförändrad annars."""
+    if "<" not in text:
+        return text
+    kandidater = [g for m in MONSTER_SRC.finditer(text) for g in m.groups() if g]
+    if kandidater:
+        # Flera taggar kan förekomma; BannerBoos egen går före.
+        bannerboo = [k for k in kandidater if "bannerboo" in k.lower()]
+        return (bannerboo or kandidater)[0].strip()
+    # Ingen src alls — kanske bara taggar runt en adress. Skala bort dem.
+    kvar = MONSTER_TAGG.sub(" ", text).strip()
+    return kvar or text
+
+
 def normalisera_url(indata: str) -> str:
-    """Tar emot full URL, url utan protokoll, eller bara ett BannerBoo-id."""
-    s = indata.strip()
+    """Tar emot full URL, adress utan protokoll, ett BannerBoo-id — eller hela
+    inbäddningskoden som BannerBoo ger en att klistra in på sajten."""
+    s = " ".join(str(indata).split())  # radbrytningar i en inklistrad kod
+    s = s.strip().strip("\"'")  # citattecken som följt med vid kopieringen
+
+    s = _adress_ur_kod(s)
+    s = s.strip().strip("\"'")
+
+    if s.startswith("//"):  # protokollrelativ, som i inbäddningskoden
+        s = "https:" + s
     if re.fullmatch(r"[0-9a-f]{8,32}", s):
         return f"https://embed.bannerboo.com/{s}"
     if not s.startswith(("http://", "https://")):
-        return "https://" + s
+        s = "https://" + s
+
+    # En iframe-adress pekar på själva kreativen. Laddarens adress ger samma
+    # annons men mäter det en riktig sida faktiskt hämtar, inklusive laddaren.
+    traff = MONSTER_IFRAME.search(s)
+    if traff:
+        fraga = "?responsive=1" if "responsive=1" in s else ""
+        return f"https://embed.bannerboo.com/{traff.group(1).lower()}{fraga}"
     return s
 
 
