@@ -27,6 +27,42 @@ program som helst. På Start-menyn finns dessutom:
 - **Annonsvikt på kommandoraden** — ett fönster där kommandot `annonsvikt` är redo
 - **Reparera Annonsvikt** — bygger om Python-miljön om något gått sönder
 
+### Uppdateringar
+
+Programmet ser efter en gång per dygn om en nyare version finns, i bakgrunden
+vid start. Finns det en dyker en grön rad upp högst upp i fönstret med
+versionsnumret och vad som är nytt, och ett klick på **Uppdatera nu** hämtar och
+installerar. Appen stänger sig under installationen och startar om av sig själv —
+den måste stängas, eftersom en körande app låser filerna som ska bytas ut.
+
+Ingenting installeras utan att du klickat. Vill du kolla när som helst finns
+**Sök efter uppdateringar** längst ned i fönstret, eller `annonsvikt
+--kolla-uppdatering` på kommandoraden.
+
+Manifestet hämtas från en fast adress som alltid pekar på senaste releasen:
+
+```
+https://github.com/bonordlin/annonsvikt/releases/latest/download/version.json
+```
+
+Den hämtade filen kontrolleras mot en **SHA-256-summa** ur manifestet innan den
+körs. Stämmer den inte — eller kommer filen från någon annan värd än GitHub, eller
+över något annat än https — installeras ingenting och du får veta varför. Appen
+hämtar och kör kod från nätet, och den kontrollen är därför inte valfri.
+
+Inställningarna ligger i `%LOCALAPPDATA%\Annonsvikt\installningar.json`, alltså
+utanför programmappen, så att de överlever en uppdatering.
+
+### Ge ut en ny version
+
+1. Skriv en rubrik för versionen i `NYHETER.md` med punkterna som ska visas i notisen
+2. Höj `VERSION` i `annonsvikt.py`
+3. `bygg-installerare.cmd` — bygger `dist\AnnonsviktSetup.exe` och `dist\version.json`
+4. Skapa en release med taggen `v<version>` på GitHub och ladda upp båda filerna
+
+Versionsnumret finns bara på ett ställe, `VERSION` i `annonsvikt.py`. Bygget
+läser det därifrån till både installeraren och manifestet.
+
 ### Bygga installeraren själv
 
 ```bat
@@ -65,6 +101,7 @@ Tar full URL, URL utan protokoll, eller bara BannerBoo-id:t.
 | `--huvud` | visa webbläsarfönstret (felsökning) |
 | `--tyst` | inga statusrader |
 | `--version` | visar vilken version som körs |
+| `--kolla-uppdatering` | ser efter om en nyare version finns |
 | `--varv N` | antal omladdningar vid sidskanning (standard 3) |
 | `--sida` / `--annons` | tvinga läge i stället för automatiskt val |
 | `--utan-samtycke` | klicka inte i samtyckesbanderollen |

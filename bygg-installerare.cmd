@@ -36,6 +36,14 @@ echo.
 "%ISCC%" /Qp /DVersion=%VER% "installer\annonsvikt.iss" || (echo   Bygget misslyckades. & exit /b 1)
 
 echo.
+echo   Skriver manifestet som appen laser for att hitta nya versioner ...
+python verktyg\skapa_manifest.py || (echo   Manifestet kunde inte skrivas. & exit /b 1)
+
+echo.
 echo   Klart: dist\AnnonsviktSetup.exe
 for %%F in ("dist\AnnonsviktSetup.exe") do echo   Storlek: %%~zF byte
+echo.
+echo   Ge ut versionen sa har:
+echo     1. Skapa en release med taggen v%VER% pa github.com/bonordlin/annonsvikt
+echo     2. Ladda upp dist\AnnonsviktSetup.exe och dist\version.json som filer
 echo.

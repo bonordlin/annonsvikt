@@ -27,6 +27,7 @@ from tkinter import filedialog, messagebox, ttk
 from types import SimpleNamespace
 
 import annonsvikt as av
+import uppdatering as upp
 
 # ── Utseende ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,11 @@ ALLVARSFARG = {
     "medel": "#c08a1e",
     "låg": SVAG,
 }
+
+# Notisen om ny version ska synas — den är hela poängen med att kolla.
+UPPD_BG = "#1f7a4d"
+UPPD_TEXT = "#ffffff"
+UPPD_SVAG = "#cfe6d8"
 
 BRODTEXT = ("Segoe UI", 10)
 RUBRIK = ("Segoe UI", 10, "bold")
@@ -120,9 +126,12 @@ class Annonsviktsfonster(tk.Tk):
         self.aktiv: tuple | None = None
         self.korr = False
         self._trad = None  # arbetstråden, så att en tyst död går att upptäcka
+        self._uppdatering = None  # manifestet när en nyare version finns
+        self._hamtar = False
         self._bild = None  # referens så att Tk inte slänger bilden
 
         self._stil()
+        self._bygg_uppdateringsrad()
         self._bygg_topp(forifylld)
         self._bygg_betygskort()
         self._bygg_flikar()
@@ -131,6 +140,8 @@ class Annonsviktsfonster(tk.Tk):
 
         self.bind("<Return>", lambda _e: self.starta_matning())
         self.after(100, self._tom_ko)
+        # Kollar i bakgrunden strax efter start — fönstret ska aldrig vänta på nätet.
+        self.after(2000, lambda: self._starta_uppdateringskontroll(tvinga=False))
 
     # ── Uppbyggnad ────────────────────────────────────────────────────────────
 
@@ -155,9 +166,141 @@ class Annonsviktsfonster(tk.Tk):
         s.configure("TButton", padding=(12, 5))
         s.configure("Kor.TButton", padding=(18, 6), font=RUBRIK)
 
+    def _bygg_uppdateringsrad(self) -> None:
+        """Byggs dold. Visas först när en nyare version faktiskt hittats."""
+        self.uppdateringsrad = tk.Frame(self, bg=UPPD_BG)
+
+        inre = tk.Frame(self.uppdateringsrad, bg=UPPD_BG)
+        inre.pack(fill="x", padx=16, pady=10)
+
+        text = tk.Frame(inre, bg=UPPD_BG)
+        text.pack(side="left", fill="x", expand=True)
+        self.uppd_rubrik = tk.Label(
+            text, text="", bg=UPPD_BG, fg=UPPD_TEXT,
+            font=("Segoe UI", 12, "bold"), anchor="w", justify="left",
+        )
+        self.uppd_rubrik.pack(anchor="w")
+        self.uppd_nyheter = tk.Label(
+            text, text="", bg=UPPD_BG, fg=UPPD_SVAG,
+            font=("Segoe UI", 9), anchor="w", justify="left",
+        )
+        self.uppd_nyheter.pack(anchor="w")
+
+        knappar = tk.Frame(inre, bg=UPPD_BG)
+        knappar.pack(side="right")
+
+        def knapp(txt, kommando, fet=False):
+            return tk.Button(
+                knappar, text=txt, command=kommando, relief="flat", bd=0,
+                bg="#ffffff" if fet else UPPD_BG,
+                fg=UPPD_BG if fet else UPPD_TEXT,
+                activebackground="#eaf5ef" if fet else UPPD_BG,
+                activeforeground=UPPD_BG if fet else UPPD_TEXT,
+                font=("Segoe UI", 10, "bold") if fet else ("Segoe UI", 9),
+                padx=14 if fet else 8, pady=5, cursor="hand2",
+                highlightthickness=0,
+            )
+
+        self.uppd_knapp = knapp("Uppdatera nu", self._installera_uppdatering, fet=True)
+        self.uppd_knapp.pack(side="left", padx=(0, 8))
+        knapp("Vad är nytt", self._oppna_releasesida).pack(side="left")
+        knapp("Senare", self._dolj_uppdatering).pack(side="left")
+
+    def _visa_uppdatering(self, manifest: dict) -> None:
+        self._uppdatering = manifest
+        self.uppd_rubrik.configure(
+            text=f"Version {manifest['version']} finns — du kör {av.VERSION}"
+        )
+        nyheter = "  ·  ".join(manifest.get("nyheter") or [])
+        if not nyheter:
+            nyheter = "Klicka på Uppdatera nu så hämtas och installeras den."
+        self.uppd_nyheter.configure(text=nyheter[:150])
+        self.uppdateringsrad.pack(fill="x", before=self._toppram)
+
+    def _dolj_uppdatering(self) -> None:
+        self.uppdateringsrad.pack_forget()
+
+    def _oppna_releasesida(self) -> None:
+        if self._uppdatering:
+            webbrowser.open(self._uppdatering.get("releasesida") or upp.RELEASESIDA)
+
+    # ── Kontroll och hämtning, alltid utanför huvudtråden ────────────────────
+
+    def _starta_uppdateringskontroll(self, tvinga: bool = False) -> None:
+        def arbete():
+            try:
+                manifest = upp.finns_uppdatering(av.VERSION, tvinga=tvinga)
+                if manifest:
+                    self.ko.put(("uppdatering", manifest))
+                elif tvinga:
+                    self.ko.put(("uppdateringsbesked",
+                                 f"Annonsvikt {av.VERSION} är den senaste versionen."))
+            except upp.Uppdateringsfel as fel:
+                # Vid automatisk kontroll ska ett nedärvt nät inte störa någon.
+                if tvinga:
+                    self.ko.put(("uppdateringsfel", str(fel)))
+            except BaseException:
+                pass
+
+        threading.Thread(target=arbete, daemon=True).start()
+
+    def _sok_uppdatering_manuellt(self) -> None:
+        self.status.configure(text="Söker efter uppdateringar …")
+        self._starta_uppdateringskontroll(tvinga=True)
+
+    def _installera_uppdatering(self) -> None:
+        if not self._uppdatering or self._hamtar:
+            return
+        if self.korr and not messagebox.askokcancel(
+            "Annonsvikt",
+            "En mätning pågår. Uppdateringen avbryter den och startar om programmet.\n\n"
+            "Vill du fortsätta?",
+        ):
+            return
+
+        manifest = self._uppdatering
+        self._hamtar = True
+        self.uppd_knapp.configure(text="Hämtar…", state="disabled")
+
+        def arbete():
+            try:
+                def framsteg(hamtat, totalt):
+                    if totalt:
+                        self.ko.put(("status",
+                                     f"Hämtar version {manifest['version']} … "
+                                     f"{100 * hamtat // totalt} %"))
+                exe = upp.hamta_installerare(manifest, framsteg)
+                self.ko.put(("uppdatering_hamtad", exe))
+            except upp.Uppdateringsfel as fel:
+                self.ko.put(("uppdateringsfel", str(fel)))
+            except BaseException as fel:
+                self.ko.put(("uppdateringsfel", f"{type(fel).__name__}: {fel}"))
+
+        threading.Thread(target=arbete, daemon=True).start()
+
+    def _kor_installationen(self, exe: str) -> None:
+        self._hamtar = False
+        self.uppd_knapp.configure(text="Uppdatera nu", state="normal")
+        manifest = self._uppdatering or {}
+        if not messagebox.askokcancel(
+            "Annonsvikt",
+            f"Version {manifest.get('version', '')} är hämtad och kontrollerad.\n\n"
+            "Annonsvikt stängs nu och installationen körs. Programmet startar "
+            "sedan om av sig självt.",
+        ):
+            return
+        try:
+            upp.starta_installation(exe)
+        except upp.Uppdateringsfel as fel:
+            messagebox.showerror("Annonsvikt", str(fel))
+            return
+        # Måste stänga: den körande appen låser filerna installeraren ska byta ut.
+        self.destroy()
+
     def _bygg_topp(self, forifylld: str) -> None:
         ram = ttk.Frame(self, padding=(16, 14, 16, 8))
         ram.pack(fill="x")
+        self._toppram = ram  # notisen packas ovanför den här
 
         ttk.Label(
             ram, text="Annonslänk, BannerBoo-id eller en sida att skanna", style="Svag.TLabel"
@@ -337,9 +480,10 @@ class Annonsviktsfonster(tk.Tk):
         self.knapp_oppna = ttk.Button(ram, text="Öppna rapport i webbläsare", command=self.oppna_rapport)
         self.knapp_oppna.pack(side="left")
         ttk.Label(
-            ram,
-            text=f"Annonsvikt {av.VERSION}  ·  mäter i headless Chromium med tom cache",
-            style="Svag.TLabel",
+            ram, text=f"Annonsvikt {av.VERSION}", style="Svag.TLabel"
+        ).pack(side="right", padx=(10, 0))
+        ttk.Button(
+            ram, text="Sök efter uppdateringar", command=self._sok_uppdatering_manuellt
         ).pack(side="right")
 
     # ── Mätning ───────────────────────────────────────────────────────────────
@@ -416,6 +560,17 @@ class Annonsviktsfonster(tk.Tk):
                 sort, nyttolast = self.ko.get_nowait()
                 if sort == "status":
                     self.status.configure(text=nyttolast)
+                elif sort == "uppdatering":
+                    self._visa_uppdatering(nyttolast)
+                elif sort == "uppdatering_hamtad":
+                    self._kor_installationen(nyttolast)
+                elif sort == "uppdateringsbesked":
+                    self.status.configure(text=nyttolast)
+                elif sort == "uppdateringsfel":
+                    self._hamtar = False
+                    self.uppd_knapp.configure(text="Uppdatera nu", state="normal")
+                    self.status.configure(text="Uppdateringen gick inte att hämta.")
+                    messagebox.showerror("Annonsvikt", nyttolast)
                 elif sort == "annons":
                     self._visa_resultat([nyttolast])
                 elif sort == "sida":

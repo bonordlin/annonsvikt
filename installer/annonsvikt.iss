@@ -64,6 +64,7 @@ Name: "skrivbordsikon"; Description: "{cm:SkapaSkrivbordsikon}"; GroupDescriptio
 [Files]
 Source: "..\annonsvikt.py";          DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\annonsvikt_gui.py";      DestDir: "{app}\app"; Flags: ignoreversion
+Source: "..\uppdatering.py";         DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\README.md";              DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\requirements.txt";       DestDir: "{app}\app"; Flags: ignoreversion
 Source: "..\test-tvaannonser.html";  DestDir: "{app}\app"; Flags: ignoreversion
@@ -84,9 +85,9 @@ Name: "{group}\{#Namn} på kommandoraden"; Filename: "{app}\Annonsvikt.cmd"; \
       WorkingDir: "{app}\app"; IconFilename: "{app}\app\annonsvikt.ico"; \
       Comment: "Öppnar ett fönster där kommandot annonsvikt kan köras"
 Name: "{group}\Reparera {#Namn}"; Filename: "powershell.exe"; \
-      Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\installera_beroenden.ps1"" -InstallDir ""{app}"""; \
+      Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\installera_beroenden.ps1"" -InstallDir ""{app}"" -Tvinga"; \
       WorkingDir: "{app}"; IconFilename: "{app}\app\annonsvikt.ico"; \
-      Comment: "Installerar om Python-miljön och webbläsaren"
+      Comment: "Bygger om Python-miljön och webbläsaren från grunden"
 
 [Run]
 Filename: "{app}\venv\Scripts\pythonw.exe"; Parameters: """{app}\app\annonsvikt_gui.py"""; \
@@ -143,10 +144,25 @@ begin
     WizardForm.ProgressGauge.Style := npbstNormal;
 end;
 
+{ Appen skickar /STARTAPP=1 när den uppdaterar sig själv, och vill startas igen. }
+function StartaEfterUppdatering(): Boolean;
+begin
+  Result := ExpandConstant('{param:STARTAPP|0}') = '1';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Kod: Integer;
 begin
   if CurStep = ssPostInstall then
+  begin
     ForberedMiljon();
+    { Startas här, inte via [Run]: först nu vet vi att miljön är klar. }
+    if BeroendenOk and StartaEfterUppdatering() then
+      Exec(ExpandConstant('{app}\venv\Scripts\pythonw.exe'),
+           '"' + ExpandConstant('{app}\app\annonsvikt_gui.py') + '"',
+           ExpandConstant('{app}\app'), SW_SHOW, ewNoWait, Kod);
+  end;
 end;
 
 { Lyckades inte miljöbygget vore det oärligt att erbjuda "starta programmet nu". }

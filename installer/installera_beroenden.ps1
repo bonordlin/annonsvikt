@@ -19,7 +19,9 @@
 #>
 
 param(
-    [Parameter(Mandatory = $true)][string]$InstallDir
+    [Parameter(Mandatory = $true)][string]$InstallDir,
+    # Reparera Annonsvikt skickar den här: bygg om miljön även om den ser hel ut.
+    [switch]$Tvinga
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,6 +109,31 @@ function Hitta-Python {
     }
     return $null
 }
+
+function Miljon-Duger {
+    <#  Duger den befintliga miljön åt den nyss installerade koden? Då behöver
+        ingenting byggas om, och en uppdatering tar sekunder i stället för en
+        minut. Chromium provas inte här utan i slutkontrollen, som ändå körs.  #>
+    if (-not (Test-Path $VenvPython)) { return $false }
+    if (-not (Test-Path (Join-Path $Venv 'Scripts\pythonw.exe'))) { return $false }
+
+    $fil = Join-Path $env:TEMP 'annonsvikt_duger.py'
+    @(
+        'import sys'
+        "sys.path.insert(0, r'$AppMapp')"
+        'import annonsvikt, annonsvikt_gui, uppdatering, tkinter'
+        'import playwright'
+    ) | Set-Content -Path $fil -Encoding UTF8
+
+    $gammal = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $VenvPython $fil 2>$null | Out-Null
+    $kod = $LASTEXITCODE
+    $ErrorActionPreference = $gammal
+    Remove-Item $fil -ErrorAction SilentlyContinue
+    return ($kod -eq 0)
+}
+
 
 function Stang-Appen([string]$Mapp) {
     <#  En körande Annonsvikt håller venv\Scripts\pythonw.exe öppen. Då går miljön
@@ -204,7 +231,13 @@ if ($python) {
 }
 
 Rubrik 'Skapar en egen Python-miljö för Annonsvikt'
-if (Test-Path $Venv) {
+$HoppaOver = $false
+if (-not $Tvinga -and (Miljon-Duger)) {
+    Skriv '  Miljön finns redan och fungerar — bygger inte om den.' Green
+    $HoppaOver = $true
+}
+
+if (-not $HoppaOver -and (Test-Path $Venv)) {
     Skriv '  En tidigare miljö fanns — den ersätts.' DarkGray
     Stang-Appen $InstallDir
     Remove-Item $Venv -Recurse -Force -ErrorAction SilentlyContinue
@@ -219,21 +252,23 @@ if (Test-Path $Venv) {
                 'Hjälper inte det, starta om datorn och försök på nytt.') 9
     }
 }
-$argument = @()
-if ($python.Forargument) { $argument += $python.Forargument }
-$argument += @('-m', 'venv', $Venv)
-Kor $python.Fil $argument 'Skapar miljön'
-if (-not (Test-Path $VenvPython)) {
-    Avbryt 'Den virtuella miljön skapades inte som väntat.' 7
+if (-not $HoppaOver) {
+    $argument = @()
+    if ($python.Forargument) { $argument += $python.Forargument }
+    $argument += @('-m', 'venv', $Venv)
+    Kor $python.Fil $argument 'Skapar miljön'
+    if (-not (Test-Path $VenvPython)) {
+        Avbryt 'Den virtuella miljön skapades inte som väntat.' 7
+    }
+
+    Rubrik 'Installerar Playwright'
+    Kor $VenvPython @('-m', 'pip', 'install', '--upgrade', 'pip', '--disable-pip-version-check', '--quiet') 'Uppdaterar pip'
+    Kor $VenvPython @('-m', 'pip', 'install', '--disable-pip-version-check', 'playwright') 'Hämtar Playwright'
+
+    Rubrik 'Installerar webbläsaren Chromium'
+    Skriv '  Ungefär 150 MB. Finns den redan på datorn går det fort.' DarkGray
+    Kor $VenvPython @('-m', 'playwright', 'install', 'chromium') 'Hämtar Chromium'
 }
-
-Rubrik 'Installerar Playwright'
-Kor $VenvPython @('-m', 'pip', 'install', '--upgrade', 'pip', '--disable-pip-version-check', '--quiet') 'Uppdaterar pip'
-Kor $VenvPython @('-m', 'pip', 'install', '--disable-pip-version-check', 'playwright') 'Hämtar Playwright'
-
-Rubrik 'Installerar webbläsaren Chromium'
-Skriv '  Ungefär 150 MB. Finns den redan på datorn går det fort.' DarkGray
-Kor $VenvPython @('-m', 'playwright', 'install', 'chromium') 'Hämtar Chromium'
 
 Rubrik 'Kontrollerar att allt fungerar'
 # Kontrollen skrivs till en fil i stället för att skickas med -c: PowerShell
@@ -242,7 +277,7 @@ $kontrollfil = Join-Path $env:TEMP 'annonsvikt_kontroll.py'
 @(
     'import sys, tkinter'
     "sys.path.insert(0, r'$AppMapp')"
-    'import annonsvikt, annonsvikt_gui'
+    'import annonsvikt, annonsvikt_gui, uppdatering'
     'from playwright.sync_api import sync_playwright'
     'with sync_playwright() as p:'
     '    webblasare = p.chromium.launch()'
@@ -264,7 +299,7 @@ $kontrollw = Join-Path $env:TEMP 'annonsvikt_kontrollw.py'
 @(
     'import sys'
     "sys.path.insert(0, r'$AppMapp')"
-    'import annonsvikt, annonsvikt_gui, tkinter'
+    'import annonsvikt, annonsvikt_gui, uppdatering, tkinter'
     'from playwright.sync_api import sync_playwright'
     "open(r'$utfall', 'w').write('OK')"
 ) | Set-Content -Path $kontrollw -Encoding UTF8

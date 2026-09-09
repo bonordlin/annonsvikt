@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 
 SAKNAS_MEDDELANDE = (
     "Playwright saknas i den här Python-miljön.\n\n"
@@ -2471,7 +2471,7 @@ def _main() -> None:
         "  python annonsvikt.py upphandling24.se --varv 3 --html sida.html\n"
         "  python annonsvikt.py https://upphandling24.se/debatt/ --utan-samtycke\n",
     )
-    ap.add_argument("url", nargs="+", help="annons-URL, BannerBoo-id, eller en sida att skanna")
+    ap.add_argument("url", nargs="*", help="annons-URL, BannerBoo-id, eller en sida att skanna")
     ap.add_argument("--vantetid", type=float, default=12.0, help="sekunder att låta annonsen rulla (standard 12)")
     ap.add_argument("--alla", action="store_true", help="lista alla filer, inte bara de tyngsta")
     ap.add_argument("--html", metavar="FIL", help="skriv en HTML-rapport")
@@ -2483,6 +2483,10 @@ def _main() -> None:
     ap.add_argument("--tyst", action="store_true", help="inga statusrader")
     ap.add_argument("--version", action="version", version=f"Annonsvikt {VERSION}")
     ap.add_argument(
+        "--kolla-uppdatering", dest="kolla_uppdatering", action="store_true",
+        help="ser efter om en nyare version av Annonsvikt finns",
+    )
+    ap.add_argument(
         "--varv", type=int, default=3,
         help="antal omladdningar av sidan för att fånga roterande annonser (standard 3)",
     )
@@ -2493,6 +2497,14 @@ def _main() -> None:
         help="klicka inte i samtyckesbanderollen (visar vad en besökare som inte godkänner får)",
     )
     args = ap.parse_args()
+
+    if args.kolla_uppdatering:
+        import uppdatering
+
+        sys.exit(uppdatering.kolla_fran_kommandoraden(VERSION))
+
+    if not args.url:
+        ap.error("ange minst en annons eller sida att mäta")
 
     resultat = []  # enskilda annonser
     sidor = []  # sidanalyser
