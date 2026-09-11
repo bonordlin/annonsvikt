@@ -180,8 +180,15 @@ class Annonsviktsfonster(tk.Tk):
         inre = tk.Frame(self.uppdateringsrad, bg=UPPD_BG)
         inre.pack(fill="x", padx=16, pady=10)
 
+        # Knapparna packas före texten. Pack fördelar utrymme i packordning, och
+        # det som packas sist får bara det som blir över — i ett smalt fönster
+        # ingenting alls.
+        knappar = tk.Frame(inre, bg=UPPD_BG)
+        knappar.pack(side="right", padx=(12, 0))
+
         text = tk.Frame(inre, bg=UPPD_BG)
-        text.pack(side="left", fill="x", expand=True)
+        text.pack(side="left", fill="both", expand=True)
+        text.bind("<Configure>", self._anpassa_notistext)
         self.uppd_rubrik = tk.Label(
             text, text="", bg=UPPD_BG, fg=UPPD_TEXT,
             font=("Segoe UI", 12, "bold"), anchor="w", justify="left",
@@ -191,10 +198,7 @@ class Annonsviktsfonster(tk.Tk):
             text, text="", bg=UPPD_BG, fg=UPPD_SVAG,
             font=("Segoe UI", 9), anchor="w", justify="left",
         )
-        self.uppd_nyheter.pack(anchor="w")
-
-        knappar = tk.Frame(inre, bg=UPPD_BG)
-        knappar.pack(side="right")
+        self.uppd_nyheter.pack(anchor="w", fill="x")
 
         def knapp(txt, kommando, fet=False):
             return tk.Button(
@@ -213,6 +217,14 @@ class Annonsviktsfonster(tk.Tk):
         knapp("Vad är nytt", self._oppna_releasesida).pack(side="left")
         knapp("Senare", self._dolj_uppdatering).pack(side="left")
 
+    def _anpassa_notistext(self, händelse) -> None:
+        """Radbryt efter tilldelad bredd i stället för att kräva egen."""
+        bredd = max(220, händelse.width - 8)
+        for etikett in (self.uppd_rubrik, self.uppd_nyheter):
+            # Bara vid faktisk ändring: annars kan Configure trigga sig själv.
+            if etikett.cget("wraplength") != bredd:
+                etikett.configure(wraplength=bredd)
+
     def _visa_uppdatering(self, manifest: dict) -> None:
         self._uppdatering = manifest
         self.uppd_rubrik.configure(
@@ -221,7 +233,7 @@ class Annonsviktsfonster(tk.Tk):
         nyheter = "  ·  ".join(manifest.get("nyheter") or [])
         if not nyheter:
             nyheter = "Klicka på Uppdatera nu så hämtas och installeras den."
-        self.uppd_nyheter.configure(text=nyheter[:150])
+        self.uppd_nyheter.configure(text=nyheter[:220])
         self.uppdateringsrad.pack(fill="x", before=self._toppram)
 
     def _dolj_uppdatering(self) -> None:
@@ -512,18 +524,20 @@ class Annonsviktsfonster(tk.Tk):
     def _bygg_botten(self) -> None:
         ram = ttk.Frame(self, padding=(16, 10, 16, 14))
         ram.pack(fill="x")
-        self.knapp_html = ttk.Button(ram, text="Spara HTML-rapport…", command=self.spara_html)
-        self.knapp_html.pack(side="left")
-        self.knapp_json = ttk.Button(ram, text="Spara JSON…", command=self.spara_json)
-        self.knapp_json.pack(side="left", padx=8)
-        self.knapp_oppna = ttk.Button(ram, text="Öppna rapport i webbläsare", command=self.oppna_rapport)
-        self.knapp_oppna.pack(side="left")
+        # Höger sida packas först, av samma skäl som i notisraden.
         ttk.Label(
             ram, text=f"Annonsvikt {av.VERSION}", style="Svag.TLabel"
         ).pack(side="right", padx=(10, 0))
         ttk.Button(
             ram, text="Sök efter uppdateringar", command=self._sok_uppdatering_manuellt
         ).pack(side="right")
+
+        self.knapp_html = ttk.Button(ram, text="Spara HTML-rapport…", command=self.spara_html)
+        self.knapp_html.pack(side="left")
+        self.knapp_json = ttk.Button(ram, text="Spara JSON…", command=self.spara_json)
+        self.knapp_json.pack(side="left", padx=8)
+        self.knapp_oppna = ttk.Button(ram, text="Öppna rapport i webbläsare", command=self.oppna_rapport)
+        self.knapp_oppna.pack(side="left")
 
     # ── Mätning ───────────────────────────────────────────────────────────────
 

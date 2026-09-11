@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 SAKNAS_MEDDELANDE = (
     "Playwright saknas i den här Python-miljön.\n\n"

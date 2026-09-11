@@ -4,6 +4,10 @@ Punkterna under den översta rubriken som matchar `VERSION` i `annonsvikt.py`
 hamnar i `version.json` och visas i uppdateringsnotisen i programmet. Håll dem
 korta — de ska rymmas på en rad i fönstret.
 
+## 1.3.1
+
+- Uppdatera nu-knappen syns även i ett fönster som inte är maximerat
+
 ## 1.3.0
 
 - Förhandsgranska bildfilerna i en annons, direkt i Filer-fliken
