@@ -190,14 +190,27 @@ installation — tkinter ingår i Python.
 
 - **Betygskort** med vikt, motivering, format och prognos efter åtgärd
 - **Översikt** — vikt per del med staplar, plus en skärmbild av annonsen som
-  den faktiskt renderades
-- **Filer** — alla resurser med storlek, andel och anmärkningar; dubbelklicka
-  på en rad för att öppna filen i webbläsaren
+  den faktiskt renderades. Klicka på bilden, eller på **Visa annonsen större**,
+  för att se den i full storlek i ett eget fönster — med 2×-förstoring och
+  möjlighet att spara den som PNG. Samma sak fungerar på varje förhandsgranskad
+  bildfil
+- **Filer** — alla resurser med storlek, andel och anmärkningar. Väljer du en
+  bildfil visas den i förhandsgranskningen till höger, tillsammans med verkligt
+  pixelmått, visningsmått och om den är överdimensionerad. Dubbelklick öppnar
+  filen i webbläsaren
 - **Råd** — samma råd som kommandoraden ger, färgade efter allvarsgrad
 - Knappar för att spara HTML-rapport och JSON, eller öppna rapporten direkt
 - Vid sidskanning fylls resultatlistan med sidan överst och en rad per annons.
   Sidposten visar annonserna i Översikt, **varje annons samtliga filer med vikt** i
   Filer — grupperade per annons, med delade filer markerade — och sidnivåråden i Råd
+
+Förhandsgranskningen ritas av webbläsaren under mätningen: varje bild ritas till
+en duk och plockas ut som PNG. Därför går även jpeg, svg och webp att visa, trots
+att Tk bara klarar PNG och GIF — och inget bildbibliotek behöver installeras.
+Ligger en bild på en annan domän utan CORS smittas duken, och då visas ingen
+förhandsgranskning; det syns i så fall i rutan. Bakom bilderna ligger ett
+rutmönster, annars skulle vita masker och genomskinliga logotyper se ut som
+tomma rutor.
 
 Mätningen körs i en egen tråd så att fönstret inte fryser medan annonsen laddas,
 och statusraden visar varje steg: vilket varv som pågår, om samtyckesbanderollen

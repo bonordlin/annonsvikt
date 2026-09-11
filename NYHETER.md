@@ -4,6 +4,12 @@ Punkterna under den översta rubriken som matchar `VERSION` i `annonsvikt.py`
 hamnar i `version.json` och visas i uppdateringsnotisen i programmet. Håll dem
 korta — de ska rymmas på en rad i fönstret.
 
+## 1.3.0
+
+- Förhandsgranska bildfilerna i en annons, direkt i Filer-fliken
+- Visa annonsen och varje bild i större format, med möjlighet att spara
+- HTML-rapporten visar en tumnagel för varje bild
+
 ## 1.2.1
 
 - Fältet tar emot BannerBoos inbäddningskod rakt av, inte bara en länk

@@ -53,6 +53,9 @@ ALLVARSFARG = {
     "låg": SVAG,
 }
 
+# Bakom förhandsgranskade bilder: vita och genomskinliga motiv syns inte mot vitt.
+BILDBAKGRUND = "#e9e4dc"
+
 # Notisen om ny version ska synas — den är hela poängen med att kolla.
 UPPD_BG = "#1f7a4d"
 UPPD_TEXT = "#ffffff"
@@ -129,6 +132,10 @@ class Annonsviktsfonster(tk.Tk):
         self._uppdatering = None  # manifestet när en nyare version finns
         self._hamtar = False
         self._bild = None  # referens så att Tk inte slänger bilden
+        self._bild_original = None  # skärmbilden i full upplösning, för större vy
+        self._forhandsbild = None  # förhandsgranskningen i Filer-fliken
+        self._forhandskalla = None  # (base64, filnamn) för den större vyn
+        self._resurs_per_rad = {}  # rad i fillistan → Resurs
 
         self._stil()
         self._bygg_uppdateringsrad()
@@ -425,14 +432,41 @@ class Annonsviktsfonster(tk.Tk):
         bildram.pack(side="right", fill="y")
         self.bildrubrik = ttk.Label(bildram, text="Så såg annonsen ut", style="Svag.TLabel")
         self.bildrubrik.pack(anchor="w")
-        self.bildyta = tk.Label(bildram, bg=KORT, relief="solid", bd=1, text="", width=34, height=10)
+        self.bildyta = tk.Label(
+            bildram, bg=KORT, relief="solid", bd=1, text="", width=34, height=10,
+            cursor="hand2",
+        )
         self.bildyta.pack(pady=(4, 0))
+        self.bildyta.bind("<Button-1>", lambda _e: self._forstora_annonsbilden())
+        self.knapp_storre = ttk.Button(
+            bildram, text="Visa annonsen större", command=self._forstora_annonsbilden
+        )
+        self.knapp_storre.pack(pady=(6, 0), anchor="w")
+        self.knapp_storre.state(["disabled"])
 
         # Filer
         filer = ttk.Frame(self.flikar, padding=12)
         self.flikar.add(filer, text="Filer")
+
+        # Förhandsgranskningen byggs först, så att listan får resten av bredden.
+        forhand = ttk.Frame(filer, padding=(14, 0, 0, 0))
+        forhand.pack(side="right", fill="y")
+        ttk.Label(forhand, text="Förhandsgranskning", style="Svag.TLabel").pack(anchor="w")
+        self.forhandsyta = tk.Label(
+            forhand, bg=BILDBAKGRUND, relief="solid", bd=1, width=34, height=11,
+            text="välj en bildfil i listan", fg=SVAG, cursor="hand2",
+        )
+        self.forhandsyta.pack(pady=(4, 6))
+        self.forhandsyta.bind("<Button-1>", lambda _e: self._forstora_forhandsbild())
+        self.forhandsinfo = ttk.Label(
+            forhand, text="", style="Svag.TLabel", justify="left", wraplength=270
+        )
+        self.forhandsinfo.pack(anchor="w")
+
+        listram = ttk.Frame(filer)
+        listram.pack(side="left", fill="both", expand=True)
         kolumner = ("typ", "vikt", "andel", "anm")
-        self.trad_filer = ttk.Treeview(filer, columns=kolumner, show="tree headings")
+        self.trad_filer = ttk.Treeview(listram, columns=kolumner, show="tree headings")
         self.trad_filer.heading("#0", text="Fil")
         self.trad_filer.heading("typ", text="Typ")
         self.trad_filer.heading("vikt", text="Vikt")
@@ -446,7 +480,7 @@ class Annonsviktsfonster(tk.Tk):
         self.trad_filer.column("vikt", width=mat * 10, anchor="e", stretch=False)
         self.trad_filer.column("andel", width=mat * 8, anchor="e", stretch=False)
         self.trad_filer.column("anm", width=mat * 40, anchor="w")
-        rull = ttk.Scrollbar(filer, orient="vertical", command=self.trad_filer.yview)
+        rull = ttk.Scrollbar(listram, orient="vertical", command=self.trad_filer.yview)
         self.trad_filer.configure(yscrollcommand=rull.set)
         self.trad_filer.pack(side="left", fill="both", expand=True)
         rull.pack(side="right", fill="y")
@@ -454,6 +488,7 @@ class Annonsviktsfonster(tk.Tk):
         self.trad_filer.tag_configure("annonsrad", font=("Consolas", 10, "bold"))
         self.trad_filer.tag_configure("delad", foreground="#1f7a4d")
         self.trad_filer.bind("<Double-1>", self._oppna_fil)
+        self.trad_filer.bind("<<TreeviewSelect>>", self._visa_forhandsgranskning)
 
         # Råd
         radram = ttk.Frame(self.flikar, padding=12)
@@ -797,6 +832,8 @@ class Annonsviktsfonster(tk.Tk):
             self.bildrubrik.configure(text="Så såg annonsen ut")
             self.bildyta.configure(image="", text="ingen skärmbild", width=34, height=10)
             self._bild = None
+            self._bild_original = None
+            self.knapp_storre.state(["disabled"])
 
         self._rita_sidfiler(s)
 
@@ -806,6 +843,8 @@ class Annonsviktsfonster(tk.Tk):
     def _rita_sidfiler(self, s) -> None:
         """Varje annons filer under en egen rubrikrad, delade filer markerade."""
         self.trad_filer.delete(*self.trad_filer.get_children())
+        self._resurs_per_rad = {}
+        self._visa_forhandsgranskning()
         _unik, delade = s.delning()
         antal_per_url = {url: antal for url, _storlek, antal in delade}
         sidtotal = s.summa_var_for_sig or 1
@@ -841,6 +880,7 @@ class Annonsviktsfonster(tk.Tk):
                     anm.append(f"delas med {delad - 1} annan annons"
                                if delad == 2 else f"delas med {delad - 1} andra annonser")
                 taggar = ("varning",) if r.dold_orsak else (("delad",) if delad else ())
+                self._resurs_per_rad[f"{fynd.id}|{r.url}"] = r
                 self.trad_filer.insert(
                     forald, "end",
                     text=r.filnamn,
@@ -909,8 +949,11 @@ class Annonsviktsfonster(tk.Tk):
 
     def _rita_filer(self, analys) -> None:
         self.trad_filer.delete(*self.trad_filer.get_children())
+        self._resurs_per_rad = {}
+        self._visa_forhandsgranskning()
         total = analys.totalvikt or 1
         for r in sorted(analys.resurser, key=lambda x: -x.storlek):
+            self._resurs_per_rad[r.url] = r
             self.trad_filer.insert(
                 "", "end", text=r.filnamn, iid=r.url,
                 tags=("varning",) if r.dold_orsak else (),
@@ -940,20 +983,142 @@ class Annonsviktsfonster(tk.Tk):
         self.radtext.configure(state="disabled")
         self.radtext.see("1.0")  # annars står vyn kvar vid sista insatta raden
 
+    @staticmethod
+    def _krymp(bild: tk.PhotoImage, maxbredd: int, maxhojd: int) -> tk.PhotoImage:
+        """Tk krymper bara i heltalssteg — räkna ut det minsta som får plats."""
+        faktor = max(
+            1,
+            -(-bild.width() // maxbredd),  # avrundat uppåt
+            -(-bild.height() // maxhojd),
+        )
+        return bild.subsample(faktor) if faktor > 1 else bild
+
+    def _visa_forhandsgranskning(self, _händelse=None) -> None:
+        """Visar den valda filens bild, när det är en bild vi kunnat rita av."""
+        rad = self.trad_filer.focus()
+        r = self._resurs_per_rad.get(rad)
+        self._forhandskalla = None
+
+        if r is None or not getattr(r, "miniatyr", ""):
+            self._forhandsbild = None
+            saknas = "ingen förhandsgranskning för den här filen"
+            if r is not None and r.kategori == "bild":
+                saknas = "bilden kunde inte ritas av — den ligger på en annan domän"
+            self.forhandsyta.configure(image="", text=saknas, width=34, height=11)
+            self.forhandsinfo.configure(text="")
+            return
+
+        try:
+            hel = tk.PhotoImage(data=r.miniatyr)
+        except tk.TclError:
+            self.forhandsyta.configure(image="", text="bilden gick inte att visa")
+            self.forhandsinfo.configure(text="")
+            return
+
+        self._forhandsbild = self._krymp(hel, 270, 190)
+        self.forhandsyta.configure(image=self._forhandsbild, text="", width=0, height=0)
+        self._forhandskalla = (r.miniatyr, r.filnamn)
+
+        delar = [f"{r.filnamn}", f"{(r.underformat or r.kategori).upper()} · {av.fmt(r.storlek)}"]
+        if r.nat_b:
+            delar.append(f"Verklig storlek: {r.nat_b} × {r.nat_h} px")
+        if r.vis_b:
+            delar.append(f"Visas som: {r.vis_b} × {r.vis_h} px")
+        if r.overdim_faktor and r.overdim_faktor > 1.15:
+            delar.append(f"Överdimensionerad {r.overdim_faktor:.1f}×".replace(".", ","))
+        if r.dold_orsak:
+            delar.append(f"Dold: {r.dold_orsak}")
+        delar.append("Klicka på bilden för att se den större.")
+        self.forhandsinfo.configure(text="\n".join(delar))
+
+    def _forstora_forhandsbild(self) -> None:
+        if self._forhandskalla:
+            data, namn = self._forhandskalla
+            self._visa_stor_bild(data, f"Annonsvikt · {namn}", namn)
+
+    def _forstora_annonsbilden(self) -> None:
+        if self._bild_original:
+            self._visa_stor_bild(
+                base64.b64encode(self._bild_original).decode("ascii"),
+                "Annonsvikt · annonsen",
+                "annons.png",
+            )
+
+    def _visa_stor_bild(self, base64_png: str, titel: str, filnamn: str) -> None:
+        """Eget fönster med bilden i full storlek, och möjlighet att spara den."""
+        try:
+            hel = tk.PhotoImage(data=base64_png)
+        except tk.TclError:
+            messagebox.showerror("Annonsvikt", "Bilden gick inte att visa.")
+            return
+
+        fonster = tk.Toplevel(self)
+        fonster.title(titel)
+        fonster.configure(bg=BG)
+        ikon = ikonsokvag()
+        if ikon:
+            try:
+                fonster.iconbitmap(ikon)
+            except tk.TclError:
+                pass
+
+        # Behåll referenser på fönstret, annars slänger Tk bilderna.
+        fonster._bilder = {1: self._krymp(hel, fonster.winfo_screenwidth() - 120,
+                                          fonster.winfo_screenheight() - 220)}
+        yta = tk.Label(fonster, bg=BILDBAKGRUND, relief="solid", bd=1,
+                       image=fonster._bilder[1])
+        yta.pack(padx=16, pady=(16, 8))
+
+        fot = ttk.Frame(fonster, padding=(16, 0, 16, 14))
+        fot.pack(fill="x")
+
+        def vaxla():
+            niva = 2 if knapp_zoom["text"] == "Förstora 2×" else 1
+            if niva not in fonster._bilder:
+                fonster._bilder[niva] = self._krymp(
+                    hel.zoom(2),
+                    fonster.winfo_screenwidth() - 120,
+                    fonster.winfo_screenheight() - 220,
+                )
+            yta.configure(image=fonster._bilder[niva])
+            knapp_zoom.configure(text="Visa 1×" if niva == 2 else "Förstora 2×")
+
+        def spara():
+            stig = filedialog.asksaveasfilename(
+                parent=fonster, defaultextension=".png", initialfile=filnamn,
+                filetypes=[("PNG-bild", "*.png")],
+            )
+            if stig:
+                with open(stig, "wb") as f:
+                    f.write(base64.b64decode(base64_png))
+
+        knapp_zoom = ttk.Button(fot, text="Förstora 2×", command=vaxla)
+        knapp_zoom.pack(side="left")
+        ttk.Button(fot, text="Spara bild…", command=spara).pack(side="left", padx=8)
+        ttk.Button(fot, text="Stäng", command=fonster.destroy).pack(side="right")
+        ttk.Label(
+            fot, text=f"{hel.width()} × {hel.height()} px", style="Svag.TLabel"
+        ).pack(side="right", padx=10)
+
+        fonster.bind("<Escape>", lambda _e: fonster.destroy())
+        fonster.transient(self)
+
     def _rita_bild(self, bild: bytes | None) -> None:
+        self._bild_original = bild
         if not bild:
             self.bildyta.configure(image="", text="ingen skärmbild")
             self._bild = None
+            self.knapp_storre.state(["disabled"])
             return
         try:
-            self._bild = tk.PhotoImage(data=base64.b64encode(bild))
-            # Tk kan bara krympa i heltalssteg — räcker för bannerformat.
-            if self._bild.width() > 320:
-                self._bild = self._bild.subsample(max(1, round(self._bild.width() / 300)))
+            hel = tk.PhotoImage(data=base64.b64encode(bild))
+            self._bild = self._krymp(hel, 300, 260)
             self.bildyta.configure(image=self._bild, text="", width=0, height=0)
+            self.knapp_storre.state(["!disabled"])
         except tk.TclError:
             self.bildyta.configure(image="", text="kunde inte visa skärmbilden")
             self._bild = None
+            self.knapp_storre.state(["disabled"])
 
     # ── Knappar ───────────────────────────────────────────────────────────────
 

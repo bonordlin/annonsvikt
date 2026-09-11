@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 
 SAKNAS_MEDDELANDE = (
     "Playwright saknas i den här Python-miljön.\n\n"
@@ -559,6 +559,7 @@ class Resurs:
     vis_h: int = 0
     overdim_faktor: float = 0.0
     dold_orsak: str = ""
+    miniatyr: str = ""  # PNG som base64, för förhandsgranskning i fönstret
     # räknat
     potential: int = 0  # rimlig storlek efter åtgärd
 
@@ -805,11 +806,29 @@ async () => {
      cs.content, cs.listStyleImage].forEach(v => urlerUr(v).forEach(u => notera(u, el)));
   });
 
+  // En visningsbar kopia: Tk klarar bara PNG, annonser innehåller jpeg och svg.
+  // Duken smittas av bilder från annan domän — då kastar toDataURL och vi avstår.
+  const MINIMAX = 640;
+  const avbild = (bild) => {
+    try {
+      const skala = Math.min(1, MINIMAX / Math.max(bild.naturalWidth, bild.naturalHeight));
+      const duk = document.createElement('canvas');
+      duk.width = Math.max(1, Math.round(bild.naturalWidth * skala));
+      duk.height = Math.max(1, Math.round(bild.naturalHeight * skala));
+      duk.getContext('2d').drawImage(bild, 0, 0, duk.width, duk.height);
+      return duk.toDataURL('image/png');
+    } catch (e) {
+      return '';
+    }
+  };
+
   // Verkliga pixelmått — bilderna ligger i cache, så det här går direkt.
   const matt = await Promise.all(Array.from(bilder.values()).map(f => new Promise(klar => {
     const i = new Image();
-    i.onload = () => klar(Object.assign(f, { nat_b: i.naturalWidth, nat_h: i.naturalHeight }));
-    i.onerror = () => klar(Object.assign(f, { nat_b: 0, nat_h: 0 }));
+    i.onload = () => klar(Object.assign(f, {
+      nat_b: i.naturalWidth, nat_h: i.naturalHeight, mini: avbild(i),
+    }));
+    i.onerror = () => klar(Object.assign(f, { nat_b: 0, nat_h: 0, mini: '' }));
     i.src = f.url;
   })));
 
@@ -1140,6 +1159,9 @@ def bygg_analys(kalla, lage, forsta_kropp, rader, sonder, konsol, navfel="") -> 
 
         info = bildinfo.get(url)
         if info:
+            avbild = info.get("mini") or ""
+            if avbild.startswith("data:image/png;base64,"):
+                r.miniatyr = avbild.split(",", 1)[1]
             r.nat_b, r.nat_h = int(info.get("nat_b") or 0), int(info.get("nat_h") or 0)
             r.vis_b, r.vis_h = int(info.get("vis_b") or 0), int(info.get("vis_h") or 0)
             r.dold_orsak = info.get("dold") or ""
@@ -1468,6 +1490,16 @@ HTML_MALL = """<!doctype html>
   .btg{display:inline-block;width:23px;height:23px;border-radius:5px;color:#fff;
        text-align:center;font-weight:700;font-size:13px;line-height:23px}
   .delad{color:var(--a);font-weight:600}
+  .tumnagel{max-width:54px;max-height:38px;border:1px solid var(--linje);border-radius:3px;
+       vertical-align:middle;
+       /* Rutmönster: vita och genomskinliga motiv syns inte mot vitt. */
+       background-color:#fff;
+       background-image:linear-gradient(45deg,#e4ded6 25%,transparent 25%),
+         linear-gradient(-45deg,#e4ded6 25%,transparent 25%),
+         linear-gradient(45deg,transparent 75%,#e4ded6 75%),
+         linear-gradient(-45deg,transparent 75%,#e4ded6 75%);
+       background-size:8px 8px;
+       background-position:0 0,0 4px,4px -4px,-4px 0}
 </style></head><body><div class="wrap">
 __INNEHALL__
 </div></body></html>"""
@@ -1543,7 +1575,7 @@ def html_innehall(a: Analys, rad: list[Rad], rubrik: str | None = None) -> list[
 
     # filer
     u.append("<h2>Alla filer</h2><div class='kort'><table>")
-    u.append("<tr><th>Fil</th><th>Typ</th><th class='n'>Vikt</th><th>Anmärkning</th></tr>")
+    u.append("<tr><th></th><th>Fil</th><th>Typ</th><th class='n'>Vikt</th><th>Anmärkning</th></tr>")
     for r in sorted(a.resurser, key=lambda r: -r.storlek):
         flaggor = []
         if r.dold_orsak:
@@ -1562,8 +1594,14 @@ def html_innehall(a: Analys, rad: list[Rad], rubrik: str | None = None) -> list[
             flaggor.append("<span class='flagga'>extern värd</span>")
         if not r.cachebar:
             flaggor.append(f"<span class='flagga'>cache: {e(r.cache_info)}</span>")
+        # Avbilder på över ~300 kB base64 utelämnas: rapporten ska gå att skicka.
+        tumnagel = (
+            f"<img class='tumnagel' src='data:image/png;base64,{r.miniatyr}' alt=''>"
+            if r.miniatyr and len(r.miniatyr) < 300000
+            else ""
+        )
         u.append(
-            f"<tr><td><span title='{e(r.url)}'>{e(r.filnamn)}</span></td>"
+            f"<tr><td>{tumnagel}</td><td><span title='{e(r.url)}'>{e(r.filnamn)}</span></td>"
             f"<td>{e(r.underformat or r.kategori)}</td><td class='n'>{e(fmt(r.storlek))}</td>"
             f"<td>{''.join(flaggor)}</td></tr>"
         )
@@ -1629,6 +1667,9 @@ def analys_till_dict(a: Analys, rad: list[Rad]) -> dict:
     d["potentialvikt"] = a.potentialvikt
     d["betyg"] = satt_betyg(a.totalvikt)[0]
     d["rad"] = [asdict(r) for r in rad]
+    # Avbilderna är till för fönstret. I JSON skulle de svälla filen utan nytta.
+    for post in d.get("resurser", []):
+        post.pop("miniatyr", None)
     return d
 
 
