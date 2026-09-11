@@ -57,11 +57,33 @@ utanför programmappen, så att de överlever en uppdatering.
 
 1. Skriv en rubrik för versionen i `NYHETER.md` med punkterna som ska visas i notisen
 2. Höj `VERSION` i `annonsvikt.py`
-3. `bygg-installerare.cmd` — bygger `dist\AnnonsviktSetup.exe` och `dist\version.json`
-4. Skapa en release med taggen `v<version>` på GitHub och ladda upp båda filerna
+3. `bygg-installerare.cmd publicera`
+
+Sista steget bygger installeraren, skriver manifestet och skapar GitHub-releasen
+med taggen `v<version>`, titeln och släppnoterna hämtade ur `NYHETER.md`. Därefter
+erbjuder alla installationer uppdateringen inom ett dygn.
+
+Utan argument bygger `bygg-installerare.cmd` bara — ett bygge under utveckling
+ska inte råka lägga upp något publikt.
+
+Publiceringen kräver GitHub CLI, inloggat en gång:
+
+```bat
+winget install -e --id GitHub.cli
+gh auth login
+```
+
+Går det inte att använda `gh` fungerar det lika bra för hand: skapa releasen på
+GitHub med taggen `v<version>` och ladda upp `dist\AnnonsviktSetup.exe` och
+`dist\version.json`.
+
+**Ladda alltid upp båda filerna från samma bygge.** Installeraren stämplar in
+byggtiden, så varje bygge ger en ny fil med ny checksumma. Blandas ett manifest
+med en exe från ett annat bygge vägrar uppdateringen att installera — vilket är
+precis vad kontrollen är till för, men förvirrande om orsaken är en förväxling.
 
 Versionsnumret finns bara på ett ställe, `VERSION` i `annonsvikt.py`. Bygget
-läser det därifrån till både installeraren och manifestet.
+läser det därifrån till installeraren, manifestet och releasens tagg.
 
 ### Bygga installeraren själv
 

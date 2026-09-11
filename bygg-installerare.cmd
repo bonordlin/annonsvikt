@@ -42,8 +42,41 @@ python verktyg\skapa_manifest.py || (echo   Manifestet kunde inte skrivas. & exi
 echo.
 echo   Klart: dist\AnnonsviktSetup.exe
 for %%F in ("dist\AnnonsviktSetup.exe") do echo   Storlek: %%~zF byte
+
+rem  Publicera bara pa uttrycklig begaran: ett bygge under utveckling ska
+rem  inte raka lagga upp nagot publikt.
+if /I not "%~1"=="publicera" (
+    echo.
+    echo   Ge ut versionen med:  bygg-installerare.cmd publicera
+    echo   Utan gh gar det ocksa for hand pa github.com/bonordlin/annonsvikt/releases/new
+    echo.
+    exit /b 0
+)
+
 echo.
-echo   Ge ut versionen sa har:
-echo     1. Skapa en release med taggen v%VER% pa github.com/bonordlin/annonsvikt
-echo     2. Ladda upp dist\AnnonsviktSetup.exe och dist\version.json som filer
+echo   Ger ut version %VER% pa GitHub ...
+
+where gh >nul 2>&1 || (
+    echo   gh saknas. Installera med:  winget install -e --id GitHub.cli
+    exit /b 1
+)
+
+gh auth status >nul 2>&1 || (
+    echo   gh ar inte inloggat. Kor:  gh auth login
+    exit /b 1
+)
+
+gh release view v%VER% >nul 2>&1 && (
+    echo   Releasen v%VER% finns redan. Hoj VERSION i annonsvikt.py forst.
+    exit /b 1
+)
+
+gh release create v%VER% "dist\AnnonsviktSetup.exe" "dist\version.json" ^
+    --title "Annonsvikt %VER%" --notes-file "dist\noter.md" || (
+    echo   Releasen kunde inte skapas.
+    exit /b 1
+)
+
+echo.
+echo   Utgiven. Alla installationer upptackar den inom ett dygn.
 echo.

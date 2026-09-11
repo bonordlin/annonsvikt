@@ -25,6 +25,7 @@ import sys
 ROT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(ROT, "dist", "AnnonsviktSetup.exe")
 MAL = os.path.join(ROT, "dist", "version.json")
+NOTER = os.path.join(ROT, "dist", "noter.md")
 KONTO = "bonordlin"
 REPO = "annonsvikt"
 
@@ -79,6 +80,17 @@ def main() -> None:
 
     with open(MAL, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    # Samma punkter blir släppnoter på GitHub, så att release och notis stämmer.
+    with open(NOTER, "w", encoding="utf-8") as f:
+        if manifest["nyheter"]:
+            f.write("\n".join(f"- {rad}" for rad in manifest["nyheter"]) + "\n")
+        else:
+            f.write(f"Annonsvikt {version}.\n")
+        f.write(
+            "\nInstallera genom att köra `AnnonsviktSetup.exe`. Har du redan "
+            "Annonsvikt erbjuder programmet uppdateringen av sig självt inom ett dygn.\n"
+        )
 
     print(f"  version.json skriven för {version} ({len(data)} byte)")
     print(f"  sha256: {manifest['sha256']}")
