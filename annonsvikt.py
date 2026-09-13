@@ -25,12 +25,13 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 
 SAKNAS_MEDDELANDE = (
     "Playwright saknas i den här Python-miljön.\n\n"
@@ -82,6 +83,14 @@ FAKTOR_PNG_KOMPRIMERING = 0.60
 
 # Ett par ord konverterade till konturer och sparade som SVG.
 SVG_ORD_BYTE = 1500
+
+# Animationen fångas som bildrutor. I en animerad annons är ingen ruta exakt lik
+# den förra — en pulserande knapp räcker — så dubbletter går inte att slå ihop.
+# Takten hålls därför nere: drygt sex rutor per sekund räcker för toningar och
+# förflyttningar, och tio sekunder blir ungefär 4 MB i stället för 9.
+FANG_INTERVALL_MS = 150
+FANG_MAX_RUTOR = 90
+FANG_MAX_S = 15.0
 
 # Skript som är animations-/hjälpbibliotek och ofta kan ersättas i en banner.
 TUNGA_BIBLIOTEK = {
@@ -717,6 +726,10 @@ class Analys:
     konsolfel: list[str] = field(default_factory=list)
     varningar: list[str] = field(default_factory=list)
     misslyckande: str = ""  # ifyllt när adressen inte gav någon annons att mäta
+    # Animationen som bildrutor: [(png, varaktighet i ms), …]. Hör till fönstret,
+    # följer aldrig med till JSON.
+    bildrutor: list = field(default_factory=list, repr=False)
+    fangad_tid_s: float = 0.0
 
     @property
     def totalvikt(self) -> int:
@@ -1058,6 +1071,52 @@ async () => {
 """
 
 
+def animationstid(text: str) -> float | None:
+    """Animationens längd ur BannerBoos konfiguration, om den finns."""
+    traff = re.search(r'"animtime"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)', text or "")
+    try:
+        varde = float(traff.group(1)) if traff else 0.0
+    except ValueError:
+        varde = 0.0
+    return varde if varde > 0 else None
+
+
+def fanga_animation(sida, element, langd_s: float) -> list:
+    """Fotograferar annonsen medan den spelar.
+
+    Returnerar [(png, varaktighet i ms), …]. Varaktigheten kommer från när rutorna
+    faktiskt togs, så att uppspelningen går i annonsens egen takt även när en
+    skärmdump tar olika lång tid."""
+    if element is None or langd_s < 1.0:
+        return []
+    rutor, tider = [], []
+    start = time.monotonic()
+    while time.monotonic() - start < langd_s and len(rutor) < FANG_MAX_RUTOR:
+        t0 = time.monotonic()
+        try:
+            rutor.append(element.screenshot(animations="allow"))
+        except Exception:
+            break
+        tider.append(t0 - start)
+        kvar = FANG_INTERVALL_MS / 1000 - (time.monotonic() - t0)
+        if kvar > 0:
+            sida.wait_for_timeout(int(kvar * 1000))
+    if len(rutor) < 2:
+        return []
+    slut = time.monotonic() - start
+    # Rutor som är exakt lika den förra slås ihop till en längre. En annons som
+    # står still en stund blir då färre rutor, och en som aldrig rör sig ingen
+    # animation alls — då räcker skärmbilden.
+    sammanslagna = []
+    for i, png in enumerate(rutor):
+        ms = max(20, int(((tider[i + 1] if i + 1 < len(tider) else slut) - tider[i]) * 1000))
+        if sammanslagna and sammanslagna[-1][0] == png:
+            sammanslagna[-1] = (png, sammanslagna[-1][1] + ms)
+        else:
+            sammanslagna.append((png, ms))
+    return sammanslagna if len(sammanslagna) > 1 else []
+
+
 def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: int,
                      tyst: bool, args=None):
     """Laddar annonsen och spelar in all nätverkstrafik. Returnerar rådata."""
@@ -1134,8 +1193,27 @@ def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: i
             sida.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
-        # Låt animationen rulla så att sent laddade resurser hinner med.
-        sida.wait_for_timeout(int(vantetid * 1000))
+
+        # Låt animationen rulla så att sent laddade resurser hinner med — och
+        # fånga den under tiden, så att mätningen inte blir en sekund längre.
+        # Är animationens längd känd fångas precis en cykel: då går loopen i
+        # förhandsvyn ihop utan skarv, var i cykeln fångsten än började.
+        vantan_s = float(vantetid)
+        fangtid = min(vantan_s, animationstid(forsta_kropp) or vantan_s, FANG_MAX_S)
+        bildrutor = []
+        start_vantan = time.monotonic()
+        if not navfel:
+            try:
+                annonsyta = sida.query_selector("iframe") or sida.query_selector("body")
+                if annonsyta:
+                    if args is not None:
+                        beratta(args, "fångar animationen …")
+                    bildrutor = fanga_animation(sida, annonsyta, fangtid)
+            except Exception:
+                bildrutor = []
+        kvar_ms = int((vantan_s - (time.monotonic() - start_vantan)) * 1000)
+        if kvar_ms > 0:
+            sida.wait_for_timeout(kvar_ms)
 
         # Sond i varje ram utom vår egen värdsida.
         sonder = []
@@ -1196,7 +1274,7 @@ def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: i
 
         webblasare.close()
 
-    return lage, forsta_kropp, rader, sonder, konsol, skarmbild, navfel
+    return lage, forsta_kropp, rader, sonder, konsol, skarmbild, navfel, bildrutor
 
 
 def las_navigeringsfel(fel: Exception) -> str:
@@ -1968,17 +2046,26 @@ def html_rapport(a: Analys, rad: list[Rad]) -> str:
 
 
 def analysera(url: str, args) -> tuple[Analys, list[Rad], bytes | None]:
-    lage, kropp, rader, sonder, konsol, bild, navfel = mat_i_webblasare(
+    lage, kropp, rader, sonder, konsol, bild, navfel, rutor = mat_i_webblasare(
         url, args.vantetid, args.huvud, args.bredd, args.hojd, args.tyst, args
     )
     a = bygg_analys(url, lage, kropp, rader, sonder, konsol, navfel)
+    a.bildrutor = rutor
+    a.fangad_tid_s = round(sum(ms for _png, ms in rutor) / 1000, 1)
     rad = samla_rad(a)
     return a, rad, bild
 
 
 def analys_till_dict(a: Analys, rad: list[Rad]) -> dict:
     """Mätningen som JSON-vänlig struktur."""
-    d = asdict(a)
+    # asdict kopierar allt djupt. Rutorna är flera MB och ska inte med i JSON,
+    # så de lyfts ur innan kopieringen i stället för att slängas efteråt.
+    rutor, a.bildrutor = a.bildrutor, []
+    try:
+        d = asdict(a)
+    finally:
+        a.bildrutor = rutor
+    d.pop("bildrutor", None)
     d["typsnitt_laddade"] = sorted(a.typsnitt_laddade)
     d["animationstyper"] = sorted(a.animationstyper)
     d["totalvikt"] = a.totalvikt

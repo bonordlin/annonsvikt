@@ -21,6 +21,7 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, ttk
@@ -106,6 +107,355 @@ def ikonsokvag() -> str:
     return ""
 
 
+# Mellanlisten mellan tabell och förhandsvy.
+GREPP = "#a89f93"
+GREPP_BG = "#f1ede7"
+GREPP_AKTIV_BG = "#eaf1f7"
+LISTLINJE = "#d9d2c8"
+
+# En avkodad bildruta tar fyra byte per bildpunkt. Ryms inte alla rutor under
+# taket avkodas de i stället när de ska visas.
+MINNESTAK_RUTOR = 64 * 1024 * 1024
+
+# Animationen tar några MB per annons och sparas bara för de senaste.
+BEHALL_ANIMATIONER = 6
+
+
+def png_matt(data: bytes) -> tuple[int, int]:
+    """Bildens mått ur PNG-huvudet, utan att avkoda bilden."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    return 0, 0
+
+
+def valj_skalning(bredd: int, hojd: int, maxbredd: int, maxhojd: int,
+                  forstoring: int = 1) -> tuple[int, int]:
+    """(zoom, subsample) som får bilden att rymmas.
+
+    Tk skalar bara i heltalssteg. Zoom och subsample går inte att kombinera till
+    ett bråk: Tk hoppar då först över bildpunkter och förstorar sedan det som
+    blev kvar, vilket blir grövre än bara subsample."""
+    maxbredd, maxhojd = max(1, maxbredd), max(1, maxhojd)
+    if bredd <= 0 or hojd <= 0:
+        return 1, 1
+    if bredd > maxbredd or hojd > maxhojd:
+        return 1, max(-(-bredd // maxbredd), -(-hojd // maxhojd))
+    return max(1, min(forstoring, maxbredd // bredd, maxhojd // hojd)), 1
+
+
+class Bildspelare:
+    """Visar annonsen i en etikett: en stillbild, eller animationen i sin egen takt.
+
+    Rutorna avkodas i den storlek ytan har och i små omgångar, så att fönstret
+    aldrig hackar. En ruta visas så länge den faktiskt stod kvar när den fångades."""
+
+    def __init__(self, yta: tk.Label, minnestak: int = MINNESTAK_RUTOR):
+        self.yta = yta
+        self.rot = yta._root()
+        self.minnestak = minnestak
+        self.rutor: list = []  # [(png, ms), …]
+        self.index = 0
+        self.pausad = False
+        self.skalning = (1, 1)  # (zoom, subsample)
+        self._forstoring = 1
+        self._cache: dict = {}
+        self._ordning: list = []
+        self._kapacitet = 1
+        self._visad = None  # rutan som visas nu, så att Tk inte slänger den
+        self._tick_jobb = None
+        self._forbered_jobb = None
+        self._forbered_i = 0
+
+    @property
+    def animerad(self) -> bool:
+        return len(self.rutor) > 1
+
+    @property
+    def matt(self) -> tuple[int, int]:
+        return png_matt(self.rutor[0][0]) if self.rutor else (0, 0)
+
+    @property
+    def aktuell_png(self) -> bytes | None:
+        return self.rutor[self.index][0] if self.rutor else None
+
+    def visa(self, rutor: list, maxbredd: int, maxhojd: int,
+             forstoring: int = 1, start: int = 0) -> bool:
+        """Byter innehåll. Returnerar False om bilden inte gick att visa."""
+        self.stoppa()
+        self.rutor = [r for r in rutor if r and r[0]]
+        if not self.rutor:
+            return False
+        self.index = start % len(self.rutor)
+        self.pausad = False
+        self._forstoring = forstoring
+        self._satt_skalning(maxbredd, maxhojd)
+        if not self._visa_ruta(self.index):
+            self.stoppa()
+            return False
+        self._starta_forberedelse()
+        if self.animerad:
+            self._tick_jobb = self.rot.after(self.rutor[self.index][1], self._tick)
+        return True
+
+    def anpassa(self, maxbredd: int, maxhojd: int, forstoring: int | None = None) -> None:
+        """Samma innehåll i en ny storlek. Avkodar bara om skalningen ändras."""
+        if not self.rutor:
+            return
+        if forstoring is not None:
+            self._forstoring = forstoring
+        tidigare = self.skalning
+        self._satt_skalning(maxbredd, maxhojd)
+        if self.skalning == tidigare:
+            return
+        self._cache.clear()
+        self._ordning.clear()
+        self._visa_ruta(self.index)
+        self._starta_forberedelse()
+
+    def vaxla_paus(self) -> bool:
+        """Pausar eller spelar vidare. Returnerar True när uppspelningen står still."""
+        if not self.animerad:
+            return False
+        self.pausad = not self.pausad
+        if self.pausad:
+            self._avbryt("_tick_jobb")
+        elif self._tick_jobb is None:
+            self._tick_jobb = self.rot.after(self.rutor[self.index][1], self._tick)
+        return self.pausad
+
+    def stoppa(self) -> None:
+        self._avbryt("_tick_jobb")
+        self._avbryt("_forbered_jobb")
+        self._cache.clear()
+        self._ordning.clear()
+        self.rutor = []
+        try:
+            self.yta.configure(image="")
+        except tk.TclError:
+            pass
+        self._visad = None
+
+    def _avbryt(self, namn: str) -> None:
+        jobb = getattr(self, namn)
+        if jobb is not None:
+            try:
+                self.rot.after_cancel(jobb)
+            except tk.TclError:
+                pass
+            setattr(self, namn, None)
+
+    def _satt_skalning(self, maxbredd: int, maxhojd: int) -> None:
+        bredd, hojd = self.matt
+        self.skalning = valj_skalning(bredd, hojd, maxbredd, maxhojd, self._forstoring)
+        zoom, sub = self.skalning
+        per_ruta = max(1, (bredd * zoom // sub) * (hojd * zoom // sub) * 4)
+        self._kapacitet = max(1, self.minnestak // per_ruta)
+
+    def _bild(self, i: int):
+        bild = self._cache.get(i)
+        if bild is not None:
+            return bild
+        try:
+            hel = tk.PhotoImage(master=self.yta, data=base64.b64encode(self.rutor[i][0]))
+        except (tk.TclError, IndexError):
+            return None
+        zoom, sub = self.skalning
+        bild = hel.subsample(sub) if sub > 1 else (hel.zoom(zoom) if zoom > 1 else hel)
+        self._cache[i] = bild
+        self._ordning.append(i)
+        while len(self._ordning) > self._kapacitet:
+            self._cache.pop(self._ordning.pop(0), None)
+        return bild
+
+    def _visa_ruta(self, i: int) -> bool:
+        bild = self._bild(i)
+        if bild is None:
+            return False
+        try:
+            self.yta.configure(image=bild, text="")
+        except tk.TclError:
+            return False
+        self._visad = bild
+        return True
+
+    def _tick(self) -> None:
+        self._tick_jobb = None
+        if not self.animerad or self.pausad:
+            return
+        try:
+            synlig = self.yta.winfo_viewable()
+        except tk.TclError:
+            self.stoppa()
+            return
+        if not synlig:
+            # Annan flik eller minimerat fönster: vänta utan att rita.
+            self._tick_jobb = self.rot.after(250, self._tick)
+            return
+        start = time.perf_counter()
+        self.index = (self.index + 1) % len(self.rutor)
+        self._visa_ruta(self.index)
+        atgang = int((time.perf_counter() - start) * 1000)
+        self._tick_jobb = self.rot.after(max(10, self.rutor[self.index][1] - atgang), self._tick)
+
+    def _starta_forberedelse(self) -> None:
+        self._avbryt("_forbered_jobb")
+        if self.animerad and self._kapacitet >= len(self.rutor):
+            self._forbered_i = 0
+            self._forbered_jobb = self.rot.after(1, self._forbered)
+
+    def _forbered(self) -> None:
+        """Avkodar rutorna i förväg, några i taget mellan fönstrets övriga arbete."""
+        self._forbered_jobb = None
+        start = time.perf_counter()
+        while self._forbered_i < len(self.rutor):
+            if self._bild(self._forbered_i) is None:
+                return
+            self._forbered_i += 1
+            if time.perf_counter() - start > 0.02:
+                break
+        if self._forbered_i < len(self.rutor):
+            self._forbered_jobb = self.rot.after(1, self._forbered)
+
+
+class Delning(tk.Frame):
+    """Två ytor sida vid sida med en mellanlist emellan som går att dra i.
+
+    Tk:s PanedWindow ritar mellanlisten som en slät yta i bakgrundens färg, och
+    den gick inte att hitta. Den här har ett synligt grepp som färgas när musen
+    är över. Läget sparas till nästa start, och dubbelklick återställer det.
+
+    Utan standardandel får vänster sida den bredd innehållet ber om, tills
+    listen dras."""
+
+    def __init__(self, foralder, nyckel: str, standardandel: float | None,
+                 min_vanster: int = 200, min_hoger: int = 220):
+        super().__init__(foralder, bg=BG, bd=0, highlightthickness=0)
+        skala = max(1.0, self.winfo_fpixels("1i") / 96)
+        self.listbredd = round(14 * skala)
+        self.skala = skala
+        self.nyckel = nyckel
+        self.standardandel = standardandel
+        self.min_vanster = round(min_vanster * skala)
+        self.min_hoger = round(min_hoger * skala)
+        self.andel = self._sparad_andel()
+        self._drag = None
+        self._over = False
+
+        self.vanster = ttk.Frame(self)
+        self.hoger = ttk.Frame(self)
+        self.list = tk.Canvas(
+            self, width=self.listbredd, bg=BG, bd=0, highlightthickness=0,
+            cursor="sb_h_double_arrow",
+        )
+        self.list.bind("<Configure>", lambda _e: self._rita_list())
+        self.list.bind("<Enter>", lambda _e: self._markera(True))
+        self.list.bind("<Leave>", lambda _e: self._markera(False))
+        self.list.bind("<ButtonPress-1>", self._borja_dra)
+        self.list.bind("<B1-Motion>", self._dra)
+        self.list.bind("<ButtonRelease-1>", self._slapp)
+        self.list.bind("<Double-Button-1>", self._aterstall)
+        self.bind("<Configure>", lambda _e: self._placera())
+
+    def _sparad_andel(self) -> float | None:
+        try:
+            return min(0.9, max(0.1, float(upp.las_installningar().get(self.nyckel))))
+        except (TypeError, ValueError):
+            return self.standardandel
+
+    def _spara(self) -> None:
+        installningar = upp.las_installningar()
+        if self.andel is None:
+            installningar.pop(self.nyckel, None)
+        else:
+            installningar[self.nyckel] = round(self.andel, 4)
+        upp.spara_installningar(installningar)
+
+    def folj_innehall(self) -> None:
+        """Nytt innehåll till vänster: ge det sin bredd, om listen inte dragits."""
+        if self.andel is not None:
+            return
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            return
+        self._placera()
+
+    def _begrans(self, x: int, yta: int) -> int:
+        if yta >= self.min_vanster + self.min_hoger:
+            return max(self.min_vanster, min(x, yta - self.min_hoger))
+        # För smalt för båda minimimåtten: dela i deras proportion.
+        return round(yta * self.min_vanster / (self.min_vanster + self.min_hoger))
+
+    def _placera(self) -> None:
+        bredd = self.winfo_width()
+        if bredd < 2:
+            return
+        yta = max(2, bredd - self.listbredd)
+        if self.andel is None:
+            onskad = self.vanster.winfo_reqwidth()
+            x = onskad if onskad > 60 else yta // 2
+        else:
+            x = round(yta * self.andel)
+        x = max(1, self._begrans(x, yta))
+        self.vanster.place(x=0, y=0, width=x, relheight=1)
+        self.list.place(x=x, y=0, width=self.listbredd, relheight=1)
+        self.hoger.place(x=x + self.listbredd, y=0, width=max(1, yta - x), relheight=1)
+
+    def _rita_list(self) -> None:
+        d = self.list
+        d.delete("all")
+        bredd, hojd = d.winfo_width(), d.winfo_height()
+        aktiv = self._over or self._drag is not None
+        farg = ACCENT if aktiv else GREPP
+        mitt = bredd // 2
+        d.create_line(mitt, 0, mitt, hojd, fill=ACCENT if aktiv else LISTLINJE, width=1)
+        # Greppet mitt på listen: en ruta med tre prickar, som på en dragbar list.
+        halv_b = max(3, round(4 * self.skala))
+        halv_h = round(26 * self.skala)
+        y = hojd // 2
+        d.create_rectangle(
+            mitt - halv_b, y - halv_h, mitt + halv_b, y + halv_h,
+            fill=GREPP_AKTIV_BG if aktiv else GREPP_BG, outline=farg,
+        )
+        prick = max(1, round(1.5 * self.skala))
+        steg = round(9 * self.skala)
+        for dy in (-steg, 0, steg):
+            d.create_oval(mitt - prick, y + dy - prick, mitt + prick, y + dy + prick,
+                          fill=farg, outline=farg)
+
+    def _markera(self, over: bool) -> None:
+        self._over = over
+        self._rita_list()
+
+    def _borja_dra(self, händelse) -> None:
+        self._drag = (händelse.x_root, self.vanster.winfo_width())
+        self._rita_list()
+
+    def _dra(self, händelse) -> None:
+        if self._drag is None:
+            return
+        start_x, start_bredd = self._drag
+        yta = max(2, self.winfo_width() - self.listbredd)
+        x = self._begrans(start_bredd + händelse.x_root - start_x, yta)
+        self.andel = x / yta
+        self._placera()
+
+    def _slapp(self, händelse) -> None:
+        if self._drag is None:
+            return
+        self._drag = None
+        # Musen kan ha lämnat listen under dragningen.
+        self._over = (0 <= händelse.x < self.list.winfo_width()
+                      and 0 <= händelse.y < self.list.winfo_height())
+        self._rita_list()
+        self._spara()
+
+    def _aterstall(self, _händelse=None) -> None:
+        self.andel = self.standardandel
+        self._placera()
+        self._spara()
+
+
 class Annonsviktsfonster(tk.Tk):
     def __init__(self, forifylld: str = ""):
         super().__init__()
@@ -117,12 +467,18 @@ class Annonsviktsfonster(tk.Tk):
                 self.iconbitmap(default=ikon)
             except tk.TclError:
                 pass
-        bredd = min(1240, self.winfo_screenwidth() - 60)
-        hojd = min(830, self.winfo_screenheight() - 80)
+        # Måtten är tänkta vid 100 % skalning. På en skärm med 175 % blev fönstret
+        # annars hälften så stort som avsett, och förhandsvyn fick ingen höjd.
+        self.skala = max(1.0, self.winfo_fpixels("1i") / 96)
+        bredd = min(round(1240 * self.skala), self.winfo_screenwidth() - 60)
+        hojd = min(round(830 * self.skala), self.winfo_screenheight() - 80)
         x = max(0, (self.winfo_screenwidth() - bredd) // 2)
         y = max(0, (self.winfo_screenheight() - hojd) // 2 - 20)
         self.geometry(f"{bredd}x{hojd}+{x}+{y}")
-        self.minsize(min(860, bredd), min(620, hojd))
+        self.minsize(min(round(860 * self.skala), bredd), min(round(620 * self.skala), hojd))
+        # Annonsen visas lika stor som i webbläsaren: en CSS-pixel blir lika många
+        # skärmpunkter som skalningen säger, i hela steg.
+        self._annonszoom = max(1, round(self.skala))
 
         self.ko: queue.Queue = queue.Queue()
         self.matningar: list[tuple] = []  # (analys, råd, skärmbild)
@@ -131,8 +487,10 @@ class Annonsviktsfonster(tk.Tk):
         self._trad = None  # arbetstråden, så att en tyst död går att upptäcka
         self._uppdatering = None  # manifestet när en nyare version finns
         self._hamtar = False
-        self._bild = None  # referens så att Tk inte slänger bilden
-        self._bild_original = None  # skärmbilden i full upplösning, för större vy
+        self._annonsrutor = []  # det förhandsvyn visar: [(png, ms), …]
+        self._annonsanalys = None
+        self._annonsvy_jobb = None  # omskalning när ytan slutat ändra storlek
+        self._bildinfo_bredd = 0
         self._forhandsbild = None  # förhandsgranskningen i Filer-fliken
         self._forhandskalla = None  # (base64, filnamn) för den större vyn
         self._forhandshel = None  # oskalad förhandsbild, ritas om när rutan ändrar storlek
@@ -149,7 +507,6 @@ class Annonsviktsfonster(tk.Tk):
 
         self.bind("<Return>", lambda _e: self.starta_matning())
         self.after(100, self._tom_ko)
-        self.after(200, self._placera_mellanlist)
         # Kollar i bakgrunden strax efter start — fönstret ska aldrig vänta på nätet.
         self.after(2000, lambda: self._starta_uppdateringskontroll(tvinga=False))
 
@@ -164,12 +521,15 @@ class Annonsviktsfonster(tk.Tk):
         s.configure(".", background=BG, foreground=TEXT, font=BRODTEXT)
         s.configure("TFrame", background=BG)
         s.configure("Kort.TFrame", background=KORT, relief="solid", borderwidth=1)
+        # Ytor inuti kortet: utan egen ram, som annars ritades rakt genom texten.
+        s.configure("KortYta.TFrame", background=KORT)
         s.configure("TLabel", background=BG, foreground=TEXT)
         s.configure("Kort.TLabel", background=KORT)
         s.configure("Svag.TLabel", foreground=SVAG)
         s.configure("SvagKort.TLabel", background=KORT, foreground=SVAG)
         s.configure("Rubrik.TLabel", font=("Segoe UI", 11, "bold"))
-        s.configure("Treeview", font=TABELL, rowheight=23, fieldbackground=KORT, background=KORT)
+        s.configure("Treeview", font=TABELL, rowheight=round(23 * self.skala),
+                    fieldbackground=KORT, background=KORT)
         s.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
         s.configure("TNotebook", background=BG, borderwidth=0)
         s.configure("TNotebook.Tab", padding=(16, 7), font=BRODTEXT)
@@ -414,7 +774,7 @@ class Annonsviktsfonster(tk.Tk):
         )
         self.betygsruta.grid(row=0, column=0, padx=(0, 18), sticky="nw")
 
-        hoger = ttk.Frame(kort, style="Kort.TFrame")
+        hoger = ttk.Frame(kort, style="KortYta.TFrame")
         hoger.grid(row=0, column=1, sticky="nsew")
         kort.columnconfigure(1, weight=1)
 
@@ -440,41 +800,65 @@ class Annonsviktsfonster(tk.Tk):
         oversikt = ttk.Frame(self.flikar, padding=12)
         self.flikar.add(oversikt, text="Översikt")
 
-        self.kategoriram = ttk.Frame(oversikt)
-        self.kategoriram.pack(side="left", fill="both", expand=True, anchor="n")
+        # Tabellen och annonsen delas av en mellanlist som går att dra i. Tills
+        # den dragits får tabellen den bredd den behöver och annonsen resten.
+        self._delning_oversikt = Delning(
+            oversikt, "delning_oversikt", None, min_vanster=200, min_hoger=280
+        )
+        self._delning_oversikt.pack(fill="both", expand=True)
 
-        bildram = ttk.Frame(oversikt, padding=(14, 0, 0, 0))
-        bildram.pack(side="right", fill="y")
-        self.bildrubrik = ttk.Label(bildram, text="Så såg annonsen ut", style="Svag.TLabel")
-        self.bildrubrik.pack(anchor="w")
-        self.bildyta = tk.Label(
-            bildram, bg=KORT, relief="solid", bd=1, text="", width=34, height=10,
-            cursor="hand2",
-        )
-        self.bildyta.pack(pady=(4, 0))
-        self.bildyta.bind("<Button-1>", lambda _e: self._forstora_annonsbilden())
-        self.knapp_storre = ttk.Button(
-            bildram, text="Visa annonsen större", command=self._forstora_annonsbilden
-        )
-        self.knapp_storre.pack(pady=(6, 0), anchor="w")
+        self.kategoriram = ttk.Frame(self._delning_oversikt.vanster, padding=(0, 0, 8, 0))
+        self.kategoriram.pack(fill="both", expand=True, anchor="n")
+
+        bildsida = ttk.Frame(self._delning_oversikt.hoger, padding=(8, 0, 0, 0))
+        bildsida.pack(fill="both", expand=True)
+
+        # Rubrik och knappar på en rad ovanför, som i Filer. Varje rad under
+        # bildytan tar höjd från annonsen, och höjden tar slut före bredden.
+        huvud = ttk.Frame(bildsida)
+        huvud.pack(side="top", fill="x")
+        # Knapparna packas före rubriken så att de syns även i en smal ruta.
+        self.knapp_storre = ttk.Button(huvud, text="Förstora", command=self._forstora_annonsbilden)
+        self.knapp_storre.pack(side="right")
         self.knapp_storre.state(["disabled"])
+        self.knapp_paus = ttk.Button(huvud, text="Pausa", command=self._vaxla_paus)
+        self.knapp_paus.pack(side="right", padx=(0, 8))
+        self.knapp_paus.state(["disabled"])
+        self.bildrubrik = ttk.Label(huvud, text="Så såg annonsen ut", style="Svag.TLabel")
+        self.bildrubrik.pack(side="left")
+
+        # Packas bara när det finns något att säga, som att animationen rensats.
+        self.bildinfo = ttk.Label(bildsida, text="", style="Svag.TLabel", justify="left")
+
+        # Ramen styr storleken, inte bilden i den — samma skäl som i Filer.
+        self.bildbehallare = tk.Frame(
+            bildsida, bg=BILDBAKGRUND, highlightthickness=1,
+            highlightbackground=LINJE, width=300, height=170,
+        )
+        self.bildbehallare.pack(side="top", fill="both", expand=True, pady=(4, 0))
+        self.bildbehallare.pack_propagate(False)
+        self.bildyta = tk.Label(
+            self.bildbehallare, bg=BILDBAKGRUND, fg=SVAG, cursor="hand2",
+            text="annonsen visas här när den är mätt —\nanimerade annonser spelas upp\n\n"
+                 "dra i mellanlisten till vänster för att\ngöra förhandsvyn större",
+        )
+        self.bildyta.pack(fill="both", expand=True)
+        self.bildyta.bind("<Button-1>", lambda _e: self._forstora_annonsbilden())
+        self.bildbehallare.bind("<Configure>", self._planera_annonsvy)
+        self.spelare = Bildspelare(self.bildyta)
 
         # Filer
         filer = ttk.Frame(self.flikar, padding=12)
         self.flikar.add(filer, text="Filer")
 
         # Listan och förhandsvyn delas av en mellanlist som går att dra i.
-        delning = tk.PanedWindow(
-            filer, orient="horizontal", bg=LINJE, sashwidth=7,
-            sashrelief="flat", showhandle=False, bd=0,
-        )
+        delning = Delning(filer, "delning_filer", 0.64, min_vanster=200, min_hoger=220)
         delning.pack(fill="both", expand=True)
-        self._delning = delning
 
-        listram = ttk.Frame(delning)
-        forhand = ttk.Frame(delning, padding=(14, 0, 0, 0))
-        delning.add(listram, minsize=380, stretch="always")
-        delning.add(forhand, minsize=260, stretch="never")
+        listram = ttk.Frame(delning.vanster, padding=(0, 0, 4, 0))
+        listram.pack(fill="both", expand=True)
+        forhand = ttk.Frame(delning.hoger, padding=(8, 0, 0, 0))
+        forhand.pack(fill="both", expand=True)
 
         huvud = ttk.Frame(forhand)
         huvud.pack(fill="x")
@@ -507,7 +891,7 @@ class Annonsviktsfonster(tk.Tk):
         self.forhandsyta.bind("<Button-1>", lambda _e: self._forstora_forhandsbild())
         self.forhandsram.bind("<Configure>", self._anpassa_forhandsvy)
         kolumner = ("typ", "vikt", "andel", "anm")
-        self.trad_filer = ttk.Treeview(listram, columns=kolumner, show="tree headings")
+        self.trad_filer = ttk.Treeview(listram, columns=kolumner, show="tree headings", height=6)
         self.trad_filer.heading("#0", text="Fil")
         self.trad_filer.heading("typ", text="Typ")
         self.trad_filer.heading("vikt", text="Vikt")
@@ -537,6 +921,7 @@ class Annonsviktsfonster(tk.Tk):
         self.radtext = tk.Text(
             radram, wrap="word", font=BRODTEXT, bg=KORT, fg=TEXT, relief="solid", bd=1,
             padx=16, pady=14, spacing1=2, spacing3=4, cursor="arrow",
+            height=8,  # begärd höjd; fliken växer ändå med fönstret
         )
         radrull = ttk.Scrollbar(radram, orient="vertical", command=self.radtext.yview)
         self.radtext.configure(yscrollcommand=radrull.set)
@@ -559,7 +944,9 @@ class Annonsviktsfonster(tk.Tk):
 
     def _bygg_botten(self) -> None:
         ram = ttk.Frame(self, padding=(16, 10, 16, 14))
-        ram.pack(fill="x")
+        # Före flikarna i packordningen: i ett lågt fönster fick flikarna annars
+        # all höjd de bad om, och knapparna här hamnade utanför fönstret.
+        ram.pack(fill="x", side="bottom", before=self.flikar)
         # Höger sida packas först, av samma skäl som i notisraden.
         ttk.Label(
             ram, text=f"Annonsvikt {av.VERSION}", style="Svag.TLabel"
@@ -698,10 +1085,22 @@ class Annonsviktsfonster(tk.Tk):
         self.progress.stop()
         forsta = len(self.matningar)
         self.matningar.extend(poster)
+        self._gallra_bildrutor()
         self.historik.configure(values=[self._etikett(p) for p in self.matningar])
         self.historik.current(forsta)
         self._rita(self.matningar[forsta])
         self._satt_knapplage()
+
+    def _gallra_bildrutor(self) -> None:
+        """Animationen tar några MB per annons. Den sparas för de senaste
+        annonserna; äldre mätningar visar skärmbilden i stället."""
+        sedda = set()
+        for post in reversed(self.matningar):
+            if post[0] != "annons" or id(post[1]) in sedda:
+                continue
+            sedda.add(id(post[1]))
+            if len(sedda) > BEHALL_ANIMATIONER:
+                post[1].bildrutor = []
 
     @staticmethod
     def _etikett(post) -> str:
@@ -757,11 +1156,10 @@ class Annonsviktsfonster(tk.Tk):
         )
 
         self.flikar.select(0)
-        self.bildrubrik.configure(text="Så såg annonsen ut")
         self._rita_kategorier(analys)
         self._rita_filer(analys)
         self._rita_rad(rad)
-        self._rita_bild(bild)
+        self._rita_bild(bild, analys, rubrik="Så såg annonsen ut")
 
     def _kategorirad(self, r: int, namn, andel, vikt, procent, antal, fet=False) -> None:
         stil = ("Segoe UI", 10, "bold") if fet else BRODTEXT
@@ -808,8 +1206,8 @@ class Annonsviktsfonster(tk.Tk):
         self.radtext.delete("1.0", "end")
         self.radtext.insert("end", analys.misslyckande + "\n")
         self.radtext.configure(state="disabled")
-        self.bildyta.configure(image="", text="ingen annons", width=34, height=10)
-        self._bild = None
+        self._delning_oversikt.folj_innehall()
+        self._rita_bild(None, rubrik="Så såg annonsen ut", tomtext="ingen annons")
         self.flikar.select(0)
 
     def _rita_sida(self, s) -> None:
@@ -869,20 +1267,16 @@ class Annonsviktsfonster(tk.Tk):
                 av.fmt(s.delad_vikt), "100 %", "", fet=True,
             )
         # Panelen visar den tyngsta annonsen; det är den råden handlar mest om.
+        self._delning_oversikt.folj_innehall()
         tyngst = max(s.poster, key=lambda p: p[1].totalvikt, default=None)
-        bild = s.bilder.get(tyngst[0].id) if tyngst else None
-        if tyngst and bild:
-            self.bildrubrik.configure(
-                text=("Annonsen på sidan" if len(s.poster) == 1
-                      else f"Tyngsta annonsen: {tyngst[0].id}")
+        if tyngst:
+            self._rita_bild(
+                s.bilder.get(tyngst[0].id), tyngst[1],
+                rubrik=("Annonsen på sidan" if len(s.poster) == 1
+                        else f"Tyngsta annonsen: {tyngst[0].id}"),
             )
-            self._rita_bild(bild)
         else:
-            self.bildrubrik.configure(text="Så såg annonsen ut")
-            self.bildyta.configure(image="", text="ingen skärmbild", width=34, height=10)
-            self._bild = None
-            self._bild_original = None
-            self.knapp_storre.state(["disabled"])
+            self._rita_bild(None, rubrik="Så såg annonsen ut", tomtext="inga annonser på sidan")
 
         self._rita_sidfiler(s)
 
@@ -975,6 +1369,7 @@ class Annonsviktsfonster(tk.Tk):
             rad + 1, "Totalt", None, av.fmt(analys.totalvikt), "100 %",
             str(len(analys.resurser)), fet=True,
         )
+        self._delning_oversikt.folj_innehall()
 
     @staticmethod
     def _filanmarkning(r) -> list[str]:
@@ -1076,16 +1471,6 @@ class Annonsviktsfonster(tk.Tk):
         )
         return bild.subsample(faktor) if faktor > 1 else bild
 
-    def _placera_mellanlist(self) -> None:
-        """Ge förhandsvyn ungefär en tredjedel av bredden från start."""
-        try:
-            self.update_idletasks()
-            bredd = self._delning.winfo_width()
-            if bredd > 700:
-                self._delning.sash_place(0, int(bredd * 0.64), 0)
-        except tk.TclError:
-            pass
-
     def _passa_forhandsbild(self) -> None:
         """Skala förhandsbilden efter den storlek rutan har just nu.
 
@@ -1173,24 +1558,31 @@ class Annonsviktsfonster(tk.Tk):
     def _forstora_forhandsbild(self) -> None:
         if self._forhandskalla:
             data, namn = self._forhandskalla
-            self._visa_stor_bild(data, f"Annonsvikt · {namn}", namn)
+            try:
+                png = base64.b64decode(data)
+            except ValueError:
+                return
+            self._visa_stor_bild([(png, 0)], f"Annonsvikt · {namn}", namn)
 
     def _forstora_annonsbilden(self) -> None:
-        if self._bild_original:
-            self._visa_stor_bild(
-                base64.b64encode(self._bild_original).decode("ascii"),
-                "Annonsvikt · annonsen",
-                "annons.png",
-            )
-
-    def _visa_stor_bild(self, base64_png: str, titel: str, filnamn: str) -> None:
-        """Eget fönster med bilden i full storlek, och möjlighet att spara den."""
-        try:
-            hel = tk.PhotoImage(data=base64_png)
-        except tk.TclError:
-            messagebox.showerror("Annonsvikt", "Bilden gick inte att visa.")
+        if not self._annonsrutor:
             return
+        namn = "annons"
+        kalla = getattr(self._annonsanalys, "kalla", "") or ""
+        if kalla:
+            namn = kalla.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or namn
+        self._visa_stor_bild(
+            self._annonsrutor, f"Annonsvikt · {namn}", f"{namn}.png",
+            start=self.spelare.index,
+        )
 
+    @staticmethod
+    def _sekunder(rutor: list) -> str:
+        return f"{sum(ms for _png, ms in rutor) / 1000:.1f} s".replace(".", ",")
+
+    def _visa_stor_bild(self, rutor: list, titel: str, filnamn: str, start: int = 0) -> None:
+        """Eget fönster med bilden i full storlek — en animation spelas upp — och
+        möjlighet att spara bilden, eller den bildruta som visas."""
         fonster = tk.Toplevel(self)
         fonster.title(titel)
         fonster.configure(bg=BG)
@@ -1201,63 +1593,135 @@ class Annonsviktsfonster(tk.Tk):
             except tk.TclError:
                 pass
 
-        # Behåll referenser på fönstret, annars slänger Tk bilderna.
-        fonster._bilder = {1: self._krymp(hel, fonster.winfo_screenwidth() - 120,
-                                          fonster.winfo_screenheight() - 220)}
-        yta = tk.Label(fonster, bg=BILDBAKGRUND, relief="solid", bd=1,
-                       image=fonster._bilder[1])
+        maxbredd = fonster.winfo_screenwidth() - 120
+        maxhojd = fonster.winfo_screenheight() - 220
+        yta = tk.Label(fonster, bg=BILDBAKGRUND, relief="solid", bd=1)
         yta.pack(padx=16, pady=(16, 8))
+        spelare = Bildspelare(yta)
+        if not spelare.visa(rutor, maxbredd, maxhojd, forstoring=self._annonszoom, start=start):
+            fonster.destroy()
+            messagebox.showerror("Annonsvikt", "Bilden gick inte att visa.")
+            return
+        # Stängs fönstret ska uppspelningen sluta och rutorna släppas.
+        fonster.bind("<Destroy>", lambda e: spelare.stoppa() if e.widget is fonster else None)
 
         fot = ttk.Frame(fonster, padding=(16, 0, 16, 14))
         fot.pack(fill="x")
 
+        if spelare.animerad:
+            def pausa():
+                knapp_paus.configure(text="Spela" if spelare.vaxla_paus() else "Pausa")
+
+            knapp_paus = ttk.Button(fot, text="Pausa", command=pausa)
+            knapp_paus.pack(side="left", padx=(0, 8))
+            fonster.bind("<space>", lambda _e: pausa())
+
+        def zoomtext():
+            return "Visa 1×" if spelare.skalning[0] >= 2 else "Förstora 2×"
+
         def vaxla():
-            niva = 2 if knapp_zoom["text"] == "Förstora 2×" else 1
-            if niva not in fonster._bilder:
-                fonster._bilder[niva] = self._krymp(
-                    hel.zoom(2),
-                    fonster.winfo_screenwidth() - 120,
-                    fonster.winfo_screenheight() - 220,
-                )
-            yta.configure(image=fonster._bilder[niva])
-            knapp_zoom.configure(text="Visa 1×" if niva == 2 else "Förstora 2×")
+            spelare.anpassa(maxbredd, maxhojd, forstoring=1 if spelare.skalning[0] >= 2 else 2)
+            knapp_zoom.configure(text=zoomtext())
 
         def spara():
+            png = spelare.aktuell_png  # rutan som visades när man klickade
             stig = filedialog.asksaveasfilename(
                 parent=fonster, defaultextension=".png", initialfile=filnamn,
                 filetypes=[("PNG-bild", "*.png")],
             )
-            if stig:
+            if stig and png:
                 with open(stig, "wb") as f:
-                    f.write(base64.b64decode(base64_png))
+                    f.write(png)
 
-        knapp_zoom = ttk.Button(fot, text="Förstora 2×", command=vaxla)
+        knapp_zoom = ttk.Button(fot, text=zoomtext(), command=vaxla)
         knapp_zoom.pack(side="left")
-        ttk.Button(fot, text="Spara bild…", command=spara).pack(side="left", padx=8)
+        bredd, hojd = spelare.matt
+        # Ryms bilden inte större på skärmen skulle knappen inte göra något.
+        if (valj_skalning(bredd, hojd, maxbredd, maxhojd, 2)
+                == valj_skalning(bredd, hojd, maxbredd, maxhojd, 1)):
+            knapp_zoom.state(["disabled"])
+        ttk.Button(
+            fot, text="Spara bildrutan…" if spelare.animerad else "Spara bild…", command=spara
+        ).pack(side="left", padx=8)
         ttk.Button(fot, text="Stäng", command=fonster.destroy).pack(side="right")
-        ttk.Label(
-            fot, text=f"{hel.width()} × {hel.height()} px", style="Svag.TLabel"
-        ).pack(side="right", padx=10)
+        besked = f"{bredd} × {hojd} px"
+        if spelare.animerad:
+            besked += f" · animerad, {self._sekunder(rutor)}"
+        ttk.Label(fot, text=besked, style="Svag.TLabel").pack(side="right", padx=10)
 
         fonster.bind("<Escape>", lambda _e: fonster.destroy())
         fonster.transient(self)
 
-    def _rita_bild(self, bild: bytes | None) -> None:
-        self._bild_original = bild
-        if not bild:
-            self.bildyta.configure(image="", text="ingen skärmbild")
-            self._bild = None
+    def _rita_bild(self, bild: bytes | None, analys=None, rubrik: str = "Så såg annonsen ut",
+                   tomtext: str = "ingen skärmbild") -> None:
+        """Annonsen i förhandsvyn: animationen när den fångats, annars skärmbilden."""
+        rutor = list(getattr(analys, "bildrutor", None) or [])
+        if len(rutor) < 2:
+            rutor = [(bild, 0)] if bild else []
+        self._annonsanalys = analys
+        self.knapp_paus.configure(text="Pausa")
+        self.bildrubrik.configure(text=rubrik)
+        self.bildinfo.pack_forget()
+
+        if not rutor or not self.spelare.visa(
+            rutor, *self._annonsvyns_matt(), forstoring=self._annonszoom
+        ):
+            self.spelare.stoppa()
+            self._annonsrutor = []
+            self.bildyta.configure(
+                image="", text="kunde inte visa skärmbilden" if rutor else tomtext
+            )
+            self.knapp_paus.state(["disabled"])
             self.knapp_storre.state(["disabled"])
             return
+
+        self._annonsrutor = rutor
+        self.knapp_storre.state(["!disabled"])
+        if self.spelare.animerad:
+            self.knapp_paus.state(["!disabled"])
+            self.bildrubrik.configure(text=f"{rubrik}  ·  animerad, {self._sekunder(rutor)}")
+            return
+        self.knapp_paus.state(["disabled"])
+        if getattr(analys, "fangad_tid_s", 0):
+            # Animationen fångades men har rensats för att spara minne.
+            self.bildinfo.configure(
+                text=f"Stillbild: animationen sparas för de {BEHALL_ANIMATIONER} senaste "
+                     "annonserna. Mät igen för att se den spelas."
+            )
+            self.bildinfo.pack(side="bottom", fill="x", pady=(4, 0), before=self.bildbehallare)
+
+    def _annonsvyns_matt(self) -> tuple[int, int]:
+        """Utrymmet för annonsen i förhandsvyn, med lite luft runt om."""
         try:
-            hel = tk.PhotoImage(data=base64.b64encode(bild))
-            self._bild = self._krymp(hel, 300, 260)
-            self.bildyta.configure(image=self._bild, text="", width=0, height=0)
-            self.knapp_storre.state(["!disabled"])
+            self.bildbehallare.update_idletasks()
         except tk.TclError:
-            self.bildyta.configure(image="", text="kunde inte visa skärmbilden")
-            self._bild = None
-            self.knapp_storre.state(["disabled"])
+            pass
+        bredd = self.bildbehallare.winfo_width() - 8
+        hojd = self.bildbehallare.winfo_height() - 8
+        if bredd < 60 or hojd < 40:  # inte utlagd ännu
+            return 300, 260
+        return bredd, hojd
+
+    def _planera_annonsvy(self, händelse=None) -> None:
+        """Skala om annonsen när ytan ändrat storlek — men först när den slutat
+        ändras, så att rutorna inte avkodas om för varje steg mellanlisten dras."""
+        if händelse is not None:
+            bredd = max(200, händelse.width - 4)
+            if bredd != self._bildinfo_bredd:  # bara vid ändring, annars kan det slå i slinga
+                self._bildinfo_bredd = bredd
+                self.bildinfo.configure(wraplength=bredd)
+        if self._annonsvy_jobb is not None:
+            self.after_cancel(self._annonsvy_jobb)
+        self._annonsvy_jobb = self.after(150, self._passa_annonsvy)
+
+    def _passa_annonsvy(self) -> None:
+        self._annonsvy_jobb = None
+        if self._annonsrutor:
+            self.spelare.anpassa(*self._annonsvyns_matt())
+
+    def _vaxla_paus(self) -> None:
+        pausad = self.spelare.vaxla_paus()
+        self.knapp_paus.configure(text="Spela" if pausad else "Pausa")
 
     # ── Knappar ───────────────────────────────────────────────────────────────
 

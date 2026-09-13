@@ -211,17 +211,19 @@ en sida att skanna, precis som kommandoraden. Samma mätmotor, ingen extra
 installation — tkinter ingår i Python.
 
 - **Betygskort** med vikt, motivering, format och prognos efter åtgärd
-- **Översikt** — vikt per del med staplar, plus en skärmbild av annonsen som
-  den faktiskt renderades. Klicka på bilden, eller på **Visa annonsen större**,
-  för att se den i full storlek i ett eget fönster — med 2×-förstoring och
-  möjlighet att spara den som PNG. Samma sak fungerar på varje förhandsgranskad
-  bildfil
+- **Översikt** — vikt per del med staplar, och annonsen som den faktiskt
+  renderades. En animerad annons spelas upp i sin egen takt och kan pausas med
+  **Pausa**; en annons som står still visas som skärmbild. Klicka på annonsen,
+  eller på **Förstora**, för att se den i ett eget fönster — i 1× eller 2×, med
+  möjlighet att spara bildrutan som visas som PNG. Samma sak fungerar på varje
+  förhandsgranskad bildfil
 - **Filer** — alla resurser med storlek, andel och anmärkningar. Väljer du en
   bildfil visas den i förhandsgranskningen till höger, med verkligt pixelmått,
   hur stor rutan är, hur mycket av bilden rutan klipper bort och vilket mått den
   borde exporteras i. Väljer du ett typsnitt visas ett prov: texten annonsen
   faktiskt sätter i det, en rad med å, ä och ö, och hur många olika tecken
-  annonsen använder ur filen. Förhandsvyn går att göra större genom att dra i mellanlisten mellan listan och vyn, eller öppna i eget fönster med **Förstora**. Dubbelklick på en rad öppnar filen i webbläsaren
+  annonsen använder ur filen. **Förstora** öppnar förhandsvyn i ett eget
+  fönster. Dubbelklick på en rad öppnar filen i webbläsaren
 - **Råd** — samma råd som kommandoraden ger, grupperade efter vem som kan göra
   något åt dem. Vid sidskanning visas sidans råd först och därefter råden för varje annons
 - Knappar för att spara HTML-rapport och JSON, eller öppna rapporten direkt
@@ -233,9 +235,29 @@ Förhandsgranskningen ritas av webbläsaren under mätningen: varje bild ritas t
 en duk och plockas ut som PNG. Därför går även jpeg, svg och webp att visa, trots
 att Tk bara klarar PNG och GIF — och inget bildbibliotek behöver installeras.
 Ligger en bild på en annan domän utan CORS smittas duken, och då visas ingen
-förhandsgranskning; det syns i så fall i rutan. Bakom bilderna ligger ett
-rutmönster, annars skulle vita masker och genomskinliga logotyper se ut som
+förhandsgranskning; det syns i så fall i rutan. Bakom bilderna ligger en
+tonad bakgrund, annars skulle vita masker och genomskinliga logotyper se ut som
 tomma rutor.
+
+**Mellanlisten.** Både Översikt och Filer delas av en mellanlist med ett grepp
+mitt på. Dra i den för att ge förhandsvyn mer eller mindre plats. Läget sparas
+till nästa start i `installningar.json`, och dubbelklick på listen återställer
+det. Tills listen dragits på Översikt får tabellen den bredd den behöver och
+annonsen resten.
+
+**Animationen** fångas under den väntetid mätningen redan har, så mätningen blir
+inte längre. Annonsen fotograferas drygt sex gånger per sekund under en cykel:
+längden läses ur BannerBoos konfiguration (`animtime`), annars används hela
+väntetiden, högst 15 sekunder. Rutor som är exakt lika den förra slås ihop, och
+en annons som aldrig rör sig får ingen animation alls. Varje ruta visas så länge
+den faktiskt stod kvar, så uppspelningen går i annonsens egen takt.
+
+Rutorna tar några MB per annons. De följer inte med till JSON eller
+HTML-rapporten, och fönstret sparar dem för de sex senaste annonserna — äldre
+mätningar i resultatlistan visar skärmbilden. Tk kan bara skala bilder i hela
+steg, så annonsen visas i 1× eller 2×, eller förminskad till hälften, en
+tredjedel och så vidare. Med förstoring i Windows, till exempel 175 %, visas den
+i 2× — ungefär lika stor som i webbläsaren.
 
 Mätningen körs i en egen tråd så att fönstret inte fryser medan annonsen laddas,
 och statusraden visar varje steg: vilket varv som pågår, om samtyckesbanderollen

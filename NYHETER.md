@@ -4,6 +4,12 @@ Punkterna under den översta rubriken som matchar `VERSION` i `annonsvikt.py`
 hamnar i `version.json` och visas i uppdateringsnotisen i programmet. Håll dem
 korta — de ska rymmas på en rad i fönstret.
 
+## 1.5.0
+
+- Animerade annonser spelas upp i förhandsvyn, med paus och större vy
+- Dra i mellanlisten på Översikt och Filer — bredden sparas till nästa gång
+- Fönstret får rätt storlek på skärmar med förstoring i Windows
+
 ## 1.4.1
 
 - Råd-fliken visar annonsens råd även vid skanning av en sida
