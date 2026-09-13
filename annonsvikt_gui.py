@@ -135,6 +135,8 @@ class Annonsviktsfonster(tk.Tk):
         self._bild_original = None  # skärmbilden i full upplösning, för större vy
         self._forhandsbild = None  # förhandsgranskningen i Filer-fliken
         self._forhandskalla = None  # (base64, filnamn) för den större vyn
+        self._forhandshel = None  # oskalad förhandsbild, ritas om när rutan ändrar storlek
+        self._forhandsmatt = (0, 0)
         self._resurs_per_rad = {}  # rad i fillistan → Resurs
 
         self._stil()
@@ -147,6 +149,7 @@ class Annonsviktsfonster(tk.Tk):
 
         self.bind("<Return>", lambda _e: self.starta_matning())
         self.after(100, self._tom_ko)
+        self.after(200, self._placera_mellanlist)
         # Kollar i bakgrunden strax efter start — fönstret ska aldrig vänta på nätet.
         self.after(2000, lambda: self._starta_uppdateringskontroll(tvinga=False))
 
@@ -460,23 +463,49 @@ class Annonsviktsfonster(tk.Tk):
         filer = ttk.Frame(self.flikar, padding=12)
         self.flikar.add(filer, text="Filer")
 
-        # Förhandsgranskningen byggs först, så att listan får resten av bredden.
-        forhand = ttk.Frame(filer, padding=(14, 0, 0, 0))
-        forhand.pack(side="right", fill="y")
-        ttk.Label(forhand, text="Förhandsgranskning", style="Svag.TLabel").pack(anchor="w")
-        self.forhandsyta = tk.Label(
-            forhand, bg=BILDBAKGRUND, relief="solid", bd=1, width=34, height=11,
-            text="välj en bildfil eller ett typsnitt", fg=SVAG, cursor="hand2",
+        # Listan och förhandsvyn delas av en mellanlist som går att dra i.
+        delning = tk.PanedWindow(
+            filer, orient="horizontal", bg=LINJE, sashwidth=7,
+            sashrelief="flat", showhandle=False, bd=0,
         )
-        self.forhandsyta.pack(pady=(4, 6))
-        self.forhandsyta.bind("<Button-1>", lambda _e: self._forstora_forhandsbild())
-        self.forhandsinfo = ttk.Label(
-            forhand, text="", style="Svag.TLabel", justify="left", wraplength=270
-        )
-        self.forhandsinfo.pack(anchor="w")
+        delning.pack(fill="both", expand=True)
+        self._delning = delning
 
-        listram = ttk.Frame(filer)
-        listram.pack(side="left", fill="both", expand=True)
+        listram = ttk.Frame(delning)
+        forhand = ttk.Frame(delning, padding=(14, 0, 0, 0))
+        delning.add(listram, minsize=380, stretch="always")
+        delning.add(forhand, minsize=260, stretch="never")
+
+        huvud = ttk.Frame(forhand)
+        huvud.pack(fill="x")
+        ttk.Label(huvud, text="Förhandsgranskning", style="Svag.TLabel").pack(side="left")
+        self.knapp_forstora = ttk.Button(
+            huvud, text="Förstora", command=self._forstora_forhandsbild
+        )
+        self.knapp_forstora.pack(side="right")
+        self.knapp_forstora.state(["disabled"])
+
+        # Bildrutan packas före texten. Pack delar ut utrymme i packordning, och
+        # bilden ska få sin plats först — texten får det som blir över.
+        # Ramen styr storleken, inte bilden i den — annars kan omritningen driva
+        # sin egen storleksändring i en slinga.
+        self.forhandsram = tk.Frame(
+            forhand, bg=BILDBAKGRUND, highlightthickness=1,
+            highlightbackground=LINJE, width=300, height=170,
+        )
+        self.forhandsram.pack(fill="both", expand=True, pady=(4, 0))
+        self.forhandsram.pack_propagate(False)
+
+        self.forhandsinfo = ttk.Label(forhand, text="", style="Svag.TLabel", justify="left")
+        self.forhandsinfo.pack(anchor="w", fill="x", pady=(6, 0))
+        self.forhandsyta = tk.Label(
+            self.forhandsram, bg=BILDBAKGRUND, cursor="hand2", fg=SVAG,
+            text="välj en bildfil eller ett typsnitt\n\n"
+                 "dra i mellanlisten till vänster för att\ngöra förhandsvyn större",
+        )
+        self.forhandsyta.pack(fill="both", expand=True)
+        self.forhandsyta.bind("<Button-1>", lambda _e: self._forstora_forhandsbild())
+        self.forhandsram.bind("<Configure>", self._anpassa_forhandsvy)
         kolumner = ("typ", "vikt", "andel", "anm")
         self.trad_filer = ttk.Treeview(listram, columns=kolumner, show="tree headings")
         self.trad_filer.heading("#0", text="Fil")
@@ -516,6 +545,10 @@ class Annonsviktsfonster(tk.Tk):
         self.radtext.tag_configure("rubrik", font=("Segoe UI", 11, "bold"), spacing1=14)
         self.radtext.tag_configure(
             "ansvar", font=("Segoe UI", 9, "bold"), foreground=SVAG, spacing1=20, spacing3=2
+        )
+        self.radtext.tag_configure(
+            "annonsrubrik", font=("Segoe UI", 13, "bold"), foreground=TEXT,
+            spacing1=26, spacing3=4,
         )
         self.radtext.tag_configure("varfor", foreground=SVAG, spacing3=6)
         self.radtext.tag_configure("steg", lmargin1=18, lmargin2=30)
@@ -817,7 +850,7 @@ class Annonsviktsfonster(tk.Tk):
         total = s.delad_vikt or 1
         self._kategorirad(0, "Annons", None, "Vikt", "Andel", "Betyg", fet=True)
         for i, (fynd, analys, _rad) in enumerate(s.poster, 1):
-            lage = "ovanför vecket" if fynd.ovanfor_veck else f"{fynd.topp_px} px ned"
+            lage = fynd.lage
             self._kategorirad(
                 i,
                 f"{fynd.id}   {fynd.plats or ''}  ({lage})",
@@ -853,7 +886,7 @@ class Annonsviktsfonster(tk.Tk):
 
         self._rita_sidfiler(s)
 
-        self._rita_rad(s.sidrad)
+        self._rita_sidrad(s)
         self.flikar.select(0)
 
     def _rita_sidfiler(self, s) -> None:
@@ -983,12 +1016,8 @@ class Annonsviktsfonster(tk.Tk):
                 ),
             )
 
-    def _rita_rad(self, rad: list) -> None:
-        self.radtext.configure(state="normal")
-        self.radtext.delete("1.0", "end")
-        if not rad:
-            self.radtext.insert("end", "Inga anmärkningar — annonsen är redan välbyggd.\n")
-        nummer = 0
+    def _skriv_radlista(self, rad: list, nummer: int = 0) -> int:
+        """Skriver råden grupperade efter vem som gör något. Returnerar sista numret."""
         for grupprubrik, lista in av.gruppera_rad(rad):
             self.radtext.insert("end", grupprubrik.upper() + "\n", "ansvar")
             for r in lista:
@@ -1000,6 +1029,40 @@ class Annonsviktsfonster(tk.Tk):
                 self.radtext.insert("end", r.varfor + "\n", "varfor")
                 for steg in r.gor:
                     self.radtext.insert("end", f"•  {steg}\n", "steg")
+        return nummer
+
+    def _rita_sidrad(self, s) -> None:
+        """Sidans råd, och därefter råden för varje annons på sidan.
+
+        Utan annonsernas egna råd blir fliken tom för en sida med en enda annons:
+        de jämförande sidråden ges bara när det finns flera att jämföra."""
+        self.radtext.configure(state="normal")
+        self.radtext.delete("1.0", "end")
+        nummer = 0
+        if s.sidrad:
+            self.radtext.insert("end", "Sidan som helhet\n", "annonsrubrik")
+            nummer = self._skriv_radlista(s.sidrad, nummer)
+        for fynd, _analys, rad in s.poster:
+            self.radtext.insert(
+                "end",
+                f"Annons {fynd.id}  ·  {fynd.format} px  ·  {fynd.plats or 'okänd annonsplats'}\n",
+                "annonsrubrik",
+            )
+            if rad:
+                nummer = self._skriv_radlista(rad, nummer)
+            else:
+                self.radtext.insert("end", "Inga anmärkningar för den här annonsen.\n", "varfor")
+        if not s.poster:
+            self.radtext.insert("end", "Inga BannerBoo-annonser hittades på sidan.\n", "varfor")
+        self.radtext.configure(state="disabled")
+        self.radtext.see("1.0")
+
+    def _rita_rad(self, rad: list) -> None:
+        self.radtext.configure(state="normal")
+        self.radtext.delete("1.0", "end")
+        if not rad:
+            self.radtext.insert("end", "Inga anmärkningar — annonsen är redan välbyggd.\n")
+        self._skriv_radlista(rad)
         self.radtext.configure(state="disabled")
         self.radtext.see("1.0")  # annars står vyn kvar vid sista insatta raden
 
@@ -1013,6 +1076,41 @@ class Annonsviktsfonster(tk.Tk):
         )
         return bild.subsample(faktor) if faktor > 1 else bild
 
+    def _placera_mellanlist(self) -> None:
+        """Ge förhandsvyn ungefär en tredjedel av bredden från start."""
+        try:
+            self.update_idletasks()
+            bredd = self._delning.winfo_width()
+            if bredd > 700:
+                self._delning.sash_place(0, int(bredd * 0.64), 0)
+        except tk.TclError:
+            pass
+
+    def _passa_forhandsbild(self) -> None:
+        """Skala förhandsbilden efter den storlek rutan har just nu.
+
+        Tk skalar bara i heltalssteg. Små bilder förstoras högst tre gånger — mer
+        än så blir bara större pixlar, inte mer att se."""
+        if self._forhandshel is None:
+            return
+        rb = max(40, self.forhandsram.winfo_width() - 16)
+        rh = max(40, self.forhandsram.winfo_height() - 16)
+        hel = self._forhandshel
+        if hel.width() > rb or hel.height() > rh:
+            self._forhandsbild = self._krymp(hel, rb, rh)
+        else:
+            zoom = max(1, min(3, rb // max(1, hel.width()), rh // max(1, hel.height())))
+            self._forhandsbild = hel.zoom(zoom) if zoom > 1 else hel
+        self.forhandsyta.configure(image=self._forhandsbild, text="")
+
+    def _anpassa_forhandsvy(self, händelse) -> None:
+        # Informationstexten bryts efter rutans bredd, bilden skalas om.
+        self.forhandsinfo.configure(wraplength=max(200, händelse.width - 4))
+        matt = (händelse.width, händelse.height)
+        if matt != self._forhandsmatt:
+            self._forhandsmatt = matt
+            self._passa_forhandsbild()
+
     def _visa_forhandsgranskning(self, _händelse=None) -> None:
         """Visar den valda filens bild, när det är en bild vi kunnat rita av."""
         rad = self.trad_filer.focus()
@@ -1021,6 +1119,8 @@ class Annonsviktsfonster(tk.Tk):
 
         if r is None or not getattr(r, "miniatyr", ""):
             self._forhandsbild = None
+            self._forhandshel = None
+            self.knapp_forstora.state(["disabled"])
             saknas = "välj en bildfil eller ett typsnitt"
             if r is not None and r.kategori == "bild":
                 saknas = "bilden kunde inte ritas av — den ligger på en annan domän"
@@ -1028,7 +1128,7 @@ class Annonsviktsfonster(tk.Tk):
                 saknas = "inget prov — typsnittet kunde inte kopplas till annonsens text"
             elif r is not None:
                 saknas = "ingen förhandsgranskning för den här filtypen"
-            self.forhandsyta.configure(image="", text=saknas, width=34, height=11)
+            self.forhandsyta.configure(image="", text=saknas)
             self.forhandsinfo.configure(text="")
             return
 
@@ -1039,8 +1139,9 @@ class Annonsviktsfonster(tk.Tk):
             self.forhandsinfo.configure(text="")
             return
 
-        self._forhandsbild = self._krymp(hel, 270, 190)
-        self.forhandsyta.configure(image=self._forhandsbild, text="", width=0, height=0)
+        self._forhandshel = hel
+        self._passa_forhandsbild()
+        self.knapp_forstora.state(["!disabled"])
 
         format_och_vikt = f"{(r.underformat or r.kategori).upper()} · {av.fmt(r.storlek)}"
         if r.kategori == "typsnitt":
@@ -1050,11 +1151,7 @@ class Annonsviktsfonster(tk.Tk):
             if r.typsnitt_text:
                 delar.append(f"Används till: \u201d{r.typsnitt_text}\u201d")
             if r.unika_tecken:
-                delar.append(
-                    f"Annonsen använder {r.unika_tecken} olika tecken ur filen, "
-                    "som innehåller hundratals."
-                )
-            delar.append("Klicka på provet för att se det större.")
+                delar.append(f"Annonsen använder {r.unika_tecken} olika tecken ur filen.")
         else:
             self._forhandskalla = (r.miniatyr, r.filnamn)
             delar = [r.filnamn, format_och_vikt]
@@ -1071,7 +1168,6 @@ class Annonsviktsfonster(tk.Tk):
                 delar.append(f"Exportera som: {r.mal_b} × {r.mal_h} px")
             if r.dold_orsak:
                 delar.append(f"Dold: {r.dold_orsak}")
-            delar.append("Klicka på bilden för att se den större.")
         self.forhandsinfo.configure(text="\n".join(delar))
 
     def _forstora_forhandsbild(self) -> None:

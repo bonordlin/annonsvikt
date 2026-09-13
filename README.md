@@ -221,9 +221,9 @@ installation — tkinter ingår i Python.
   hur stor rutan är, hur mycket av bilden rutan klipper bort och vilket mått den
   borde exporteras i. Väljer du ett typsnitt visas ett prov: texten annonsen
   faktiskt sätter i det, en rad med å, ä och ö, och hur många olika tecken
-  annonsen använder ur filen. Dubbelklick öppnar filen i webbläsaren
+  annonsen använder ur filen. Förhandsvyn går att göra större genom att dra i mellanlisten mellan listan och vyn, eller öppna i eget fönster med **Förstora**. Dubbelklick på en rad öppnar filen i webbläsaren
 - **Råd** — samma råd som kommandoraden ger, grupperade efter vem som kan göra
-  något åt dem
+  något åt dem. Vid sidskanning visas sidans råd först och därefter råden för varje annons
 - Knappar för att spara HTML-rapport och JSON, eller öppna rapporten direkt
 - Vid sidskanning fylls resultatlistan med sidan överst och en rad per annons.
   Sidposten visar annonserna i Översikt, **varje annons samtliga filer med vikt** i

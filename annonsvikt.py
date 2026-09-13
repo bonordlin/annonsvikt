@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 SAKNAS_MEDDELANDE = (
     "Playwright saknas i den här Python-miljön.\n\n"
@@ -2023,9 +2023,18 @@ class Annonsfynd:
     hojd: int = 0
     topp_px: int = 0
     ovanfor_veck: bool = False
+    # Skild från topp_px: en annons högst upp har toppen på 0, och 0 är en
+    # position — inte ett tecken på att positionen saknas.
+    position_kand: bool = False
     plats: str = ""
     responsive: bool = False
     varv_sedd: set = field(default_factory=set)
+
+    @property
+    def lage(self) -> str:
+        if not self.position_kand:
+            return "position okänd"
+        return "ovanför vecket" if self.ovanfor_veck else f"{self.topp_px} px ned på sidan"
 
     @property
     def matning_url(self) -> str:
@@ -2257,8 +2266,11 @@ def samla_fynd(fynd: dict, traffar: list, dom: dict, varv: int) -> None:
         f.iframe_url = url
         if el.get("b"):
             f.bredd, f.hojd = int(el["b"]), int(el["h"])
-        if el.get("topp"):
-            f.topp_px = int(el["topp"])
+        # Positionen går att lita på när ramen faktiskt har en storlek. Toppen
+        # kan då mycket väl vara 0 — det är annonsen högst upp på sidan.
+        if el.get("b") or el.get("h"):
+            f.position_kand = True
+            f.topp_px = int(el.get("topp") or 0)
             f.ovanfor_veck = f.topp_px < int(dom.get("veck") or 0)
         if el.get("plats"):
             f.plats = el["plats"]
@@ -2365,7 +2377,7 @@ def analysera_sida(url: str, args) -> Sidanalys:
     """Skannar sidan efter annonser och mäter var och en isolerat."""
     (fynd, knapp, banderoll, sidhojd, varningar,
      korda_varv, stabil, andra_iframes) = skanna_sida(url, args)
-    fynd.sort(key=lambda f: (f.topp_px or 10**9, f.id))
+    fynd.sort(key=lambda f: (f.topp_px if f.position_kand else 10**9, f.id))
 
     s = Sidanalys(
         url=url,
@@ -2459,7 +2471,7 @@ def sidrad_sidbudget(s: Sidanalys) -> list[Rad]:
 
 @sidregel(90)
 def sidrad_lat_ladda(s: Sidanalys) -> list[Rad]:
-    under = [(f, a) for f, a, _ in s.poster if f.topp_px and not f.ovanfor_veck]
+    under = [(f, a) for f, a, _ in s.poster if f.position_kand and not f.ovanfor_veck]
     if not under:
         return []
     vikt = sum(a.totalvikt for _, a in under)
@@ -2653,12 +2665,7 @@ def skriv_sidrapport(s: Sidanalys, visa_alla: bool) -> None:
             f"  {fynd.id:<16}{fynd.format:<11}{plats:<21}"
             f"{fmt(analys.totalvikt):>10} {satt_betyg(analys.totalvikt)[0]:>6} {varv:>5}"
         )
-        lage = (
-            "ovanför vecket"
-            if fynd.ovanfor_veck
-            else f"{fynd.topp_px} px ned på sidan"
-        )
-        p(f"  {'':<16}{lage}")
+        p(f"  {'':<16}{fynd.lage}")
     p("  " + "─" * (W - 4))
     p(f"  {'Summa var för sig':<48}{fmt(s.summa_var_for_sig):>10}")
     p(f"  {'Faktisk kostnad för besökaren':<48}{fmt(s.delad_vikt):>10}")
@@ -2780,7 +2787,7 @@ def html_sidrapport(s: Sidanalys) -> str:
     )
     for fynd, analys, _ in s.poster:
         bok = satt_betyg(analys.totalvikt)[0]
-        lage = "ovanför vecket" if fynd.ovanfor_veck else f"{fynd.topp_px} px ned"
+        lage = fynd.lage
         u.append(
             f"<tr><td><a href='#annons-{e(fynd.id)}'>{e(fynd.id)}</a></td>"
             f"<td>{e(fynd.format)}</td><td>{e(fynd.plats or '—')}</td><td>{e(lage)}</td>"

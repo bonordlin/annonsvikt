@@ -4,6 +4,12 @@ Punkterna under den översta rubriken som matchar `VERSION` i `annonsvikt.py`
 hamnar i `version.json` och visas i uppdateringsnotisen i programmet. Håll dem
 korta — de ska rymmas på en rad i fönstret.
 
+## 1.4.1
+
+- Råd-fliken visar annonsens råd även vid skanning av en sida
+- Förhandsvyn går att göra större genom att dra i mellanlisten
+- En annons högst upp på sidan räknas nu som ovanför vecket
+
 ## 1.4.0
 
 - Förhandsgranska typsnitten med texten annonsen sätter i dem
