@@ -466,7 +466,7 @@ class Annonsviktsfonster(tk.Tk):
         ttk.Label(forhand, text="Förhandsgranskning", style="Svag.TLabel").pack(anchor="w")
         self.forhandsyta = tk.Label(
             forhand, bg=BILDBAKGRUND, relief="solid", bd=1, width=34, height=11,
-            text="välj en bildfil i listan", fg=SVAG, cursor="hand2",
+            text="välj en bildfil eller ett typsnitt", fg=SVAG, cursor="hand2",
         )
         self.forhandsyta.pack(pady=(4, 6))
         self.forhandsyta.bind("<Button-1>", lambda _e: self._forstora_forhandsbild())
@@ -514,6 +514,9 @@ class Annonsviktsfonster(tk.Tk):
         self.radtext.pack(side="left", fill="both", expand=True)
         radrull.pack(side="right", fill="y")
         self.radtext.tag_configure("rubrik", font=("Segoe UI", 11, "bold"), spacing1=14)
+        self.radtext.tag_configure(
+            "ansvar", font=("Segoe UI", 9, "bold"), foreground=SVAG, spacing1=20, spacing3=2
+        )
         self.radtext.tag_configure("varfor", foreground=SVAG, spacing3=6)
         self.radtext.tag_configure("steg", lmargin1=18, lmargin2=30)
         self.radtext.tag_configure("vinst", font=("Segoe UI", 10, "bold"), foreground="#1f7a4d")
@@ -706,15 +709,14 @@ class Annonsviktsfonster(tk.Tk):
         delar.append(f"{len(analys.resurser)} förfrågningar")
         self.etikett_format.configure(text="  ·  ".join(delar))
 
-        mal = analys.potentialvikt
-        valfritt = sum(r.sparar for r in rad if r.valfritt)
+        egen, full = analys.potential_egen, analys.potentialvikt
         rader = [
-            "Möjlig vikt efter åtgärd",
-            f"{av.fmt(mal)} · betyg {av.satt_betyg(mal)[0]} · −{av.procent(analys.totalvikt - mal, analys.totalvikt)}",
+            "Det ni kan göra i BannerBoo",
+            f"{av.fmt(egen)} · betyg {av.satt_betyg(egen)[0]} · "
+            f"−{av.procent(analys.totalvikt - egen, analys.totalvikt)}",
         ]
-        if valfritt:
-            mv = max(mal - valfritt, 0)
-            rader.append(f"med större ingrepp: {av.fmt(mv)} · {av.satt_betyg(mv)[0]}")
+        if full < egen:
+            rader.append(f"om BannerBoo gör sin del: {av.fmt(full)} · {av.satt_betyg(full)[0]}")
         self.etikett_prognos.configure(text="\n".join(rader))
 
         self.status.configure(
@@ -947,8 +949,10 @@ class Annonsviktsfonster(tk.Tk):
         anm = []
         if r.dold_orsak:
             anm.append(f"DOLD ({r.dold_orsak})")
-        if r.overdim_faktor and r.overdim_faktor > 1.15:
-            anm.append(f"{r.nat_b}×{r.nat_h} → {r.vis_b}×{r.vis_h} px")
+        if r.bildatgard:
+            anm.append(r.bildatgard)
+        if r.kategori == "typsnitt" and r.unika_tecken:
+            anm.append(f"{r.unika_tecken} tecken används")
         if r.text_utan_komprimering:
             anm.append("okomprimerad")
         if r.bibliotek:
@@ -984,16 +988,18 @@ class Annonsviktsfonster(tk.Tk):
         self.radtext.delete("1.0", "end")
         if not rad:
             self.radtext.insert("end", "Inga anmärkningar — annonsen är redan välbyggd.\n")
-        for i, r in enumerate(rad, 1):
-            self.radtext.insert("end", f"{i}. {r.rubrik}", ("rubrik", f"allvar_{r.allvar}"))
-            if r.sparar:
-                self.radtext.insert("end", f"   −{av.fmt(r.sparar)}", "vinst")
-            if r.valfritt:
-                self.radtext.insert("end", "   (större ingrepp)", "varfor")
-            self.radtext.insert("end", "\n")
-            self.radtext.insert("end", r.varfor + "\n", "varfor")
-            for steg in r.gor:
-                self.radtext.insert("end", f"•  {steg}\n", "steg")
+        nummer = 0
+        for grupprubrik, lista in av.gruppera_rad(rad):
+            self.radtext.insert("end", grupprubrik.upper() + "\n", "ansvar")
+            for r in lista:
+                nummer += 1
+                self.radtext.insert("end", f"{nummer}. {r.rubrik}", ("rubrik", f"allvar_{r.allvar}"))
+                if r.sparar:
+                    self.radtext.insert("end", f"   −{av.fmt(r.sparar)}", "vinst")
+                self.radtext.insert("end", "\n")
+                self.radtext.insert("end", r.varfor + "\n", "varfor")
+                for steg in r.gor:
+                    self.radtext.insert("end", f"•  {steg}\n", "steg")
         self.radtext.configure(state="disabled")
         self.radtext.see("1.0")  # annars står vyn kvar vid sista insatta raden
 
@@ -1015,9 +1021,13 @@ class Annonsviktsfonster(tk.Tk):
 
         if r is None or not getattr(r, "miniatyr", ""):
             self._forhandsbild = None
-            saknas = "ingen förhandsgranskning för den här filen"
+            saknas = "välj en bildfil eller ett typsnitt"
             if r is not None and r.kategori == "bild":
                 saknas = "bilden kunde inte ritas av — den ligger på en annan domän"
+            elif r is not None and r.kategori == "typsnitt":
+                saknas = "inget prov — typsnittet kunde inte kopplas till annonsens text"
+            elif r is not None:
+                saknas = "ingen förhandsgranskning för den här filtypen"
             self.forhandsyta.configure(image="", text=saknas, width=34, height=11)
             self.forhandsinfo.configure(text="")
             return
@@ -1025,24 +1035,43 @@ class Annonsviktsfonster(tk.Tk):
         try:
             hel = tk.PhotoImage(data=r.miniatyr)
         except tk.TclError:
-            self.forhandsyta.configure(image="", text="bilden gick inte att visa")
+            self.forhandsyta.configure(image="", text="förhandsgranskningen gick inte att visa")
             self.forhandsinfo.configure(text="")
             return
 
         self._forhandsbild = self._krymp(hel, 270, 190)
         self.forhandsyta.configure(image=self._forhandsbild, text="", width=0, height=0)
-        self._forhandskalla = (r.miniatyr, r.filnamn)
 
-        delar = [f"{r.filnamn}", f"{(r.underformat or r.kategori).upper()} · {av.fmt(r.storlek)}"]
-        if r.nat_b:
-            delar.append(f"Verklig storlek: {r.nat_b} × {r.nat_h} px")
-        if r.vis_b:
-            delar.append(f"Visas som: {r.vis_b} × {r.vis_h} px")
-        if r.overdim_faktor and r.overdim_faktor > 1.15:
-            delar.append(f"Överdimensionerad {r.overdim_faktor:.1f}×".replace(".", ","))
-        if r.dold_orsak:
-            delar.append(f"Dold: {r.dold_orsak}")
-        delar.append("Klicka på bilden för att se den större.")
+        format_och_vikt = f"{(r.underformat or r.kategori).upper()} · {av.fmt(r.storlek)}"
+        if r.kategori == "typsnitt":
+            namn = r.typsnitt_familj or r.filnamn
+            self._forhandskalla = (r.miniatyr, f"{namn}.png")
+            delar = [namn, format_och_vikt]
+            if r.typsnitt_text:
+                delar.append(f"Används till: \u201d{r.typsnitt_text}\u201d")
+            if r.unika_tecken:
+                delar.append(
+                    f"Annonsen använder {r.unika_tecken} olika tecken ur filen, "
+                    "som innehåller hundratals."
+                )
+            delar.append("Klicka på provet för att se det större.")
+        else:
+            self._forhandskalla = (r.miniatyr, r.filnamn)
+            delar = [r.filnamn, format_och_vikt]
+            if r.nat_b:
+                delar.append(f"Verklig storlek: {r.nat_b} × {r.nat_h} px")
+            if r.vis_b:
+                delar.append(f"Visas i en ruta på: {r.vis_b} × {r.vis_h} px")
+            if r.beskuren_andel >= av.BESKURET_TROSKEL:
+                delar.append(
+                    f"Syns: {r.synlig_b} × {r.synlig_h} px — "
+                    f"{av.procent(r.beskuren_andel, 1)} klipps bort"
+                )
+            if r.bildatgard:
+                delar.append(f"Exportera som: {r.mal_b} × {r.mal_h} px")
+            if r.dold_orsak:
+                delar.append(f"Dold: {r.dold_orsak}")
+            delar.append("Klicka på bilden för att se den större.")
         self.forhandsinfo.configure(text="\n".join(delar))
 
     def _forstora_forhandsbild(self) -> None:

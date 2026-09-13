@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 
 SAKNAS_MEDDELANDE = (
     "Playwright saknas i den här Python-miljön.\n\n"
@@ -70,6 +70,19 @@ FAKTOR_PNG_TILL_WEBP = 0.55
 FAKTOR_GIF_TILL_VIDEO = 0.25
 NETTHINNA = 2.0  # bilder får vara 2× visningsytan (retina), inte mer
 
+# En bild flaggas när minst så här stor andel av pixlarna aldrig behövs.
+BILD_TROSKEL = 0.10
+# Så här mycket måste klippas bort för att det ska kallas beskärning.
+BESKURET_TROSKEL = 0.02
+
+# Vad ni själva får ut av att komprimera inför uppladdning. WebP räknas inte in —
+# det är okänt om BannerBoo tar emot formatet.
+FAKTOR_JPEG_KOMPRIMERING = 0.80
+FAKTOR_PNG_KOMPRIMERING = 0.60
+
+# Ett par ord konverterade till konturer och sparade som SVG.
+SVG_ORD_BYTE = 1500
+
 # Skript som är animations-/hjälpbibliotek och ofta kan ersättas i en banner.
 TUNGA_BIBLIOTEK = {
     "gsap": "GSAP",
@@ -102,7 +115,9 @@ MONSTER_SPARNING = re.compile(
 #    gor         lista med konkreta steg
 #    sparar      uppskattad besparing i byte (0 om okänd)
 #    allvar      "kritisk" | "hög" | "medel" | "låg"
-#    valfritt    True = kräver större ingrepp, räknas inte in i huvudprognosen
+#    ansvar      "ni" = görs i BannerBoo, "sajten" = görs i WordPress,
+#                "bannerboo" = styrs av BannerBoo och går inte att ändra i annonsen
+#    valfritt    kvar för bakåtkompatibilitet, används inte längre
 #
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -127,9 +142,343 @@ class Rad:
     sparar: int = 0
     allvar: str = "medel"
     valfritt: bool = False
+    ansvar: str = "ni"
+
+
+
+ANSVARSORDNING = ("ni", "sajten", "bannerboo")
+ANSVARSRUBRIKER = {
+    "ni": "Det här gör ni i BannerBoo",
+    "sajten": "Det här gör ni på sajten",
+    "bannerboo": "Det här styrs av BannerBoo — ta upp det med dem",
+}
+
+
+def gruppera_rad(rad: list) -> list:
+    """Råden i den ordning man agerar på dem: först det man kan göra själv."""
+    grupper = []
+    for nyckel in ANSVARSORDNING:
+        lista = [r for r in rad if getattr(r, "ansvar", "ni") == nyckel]
+        if lista:
+            grupper.append((ANSVARSRUBRIKER[nyckel], lista))
+    ovriga = [r for r in rad if getattr(r, "ansvar", "ni") not in ANSVARSRUBRIKER]
+    if ovriga:
+        grupper.append(("Övrigt", ovriga))
+    return grupper
+
+
+def _ansvarsnyckel(r) -> tuple:
+    ansvar = getattr(r, "ansvar", "ni")
+    ordning = ANSVARSORDNING.index(ansvar) if ansvar in ANSVARSORDNING else len(ANSVARSORDNING)
+    return (ordning, -r.sparar)
 
 
 @regel(100)
+def rad_bildmatt(a: "Analys") -> list[Rad]:
+    """Bilder som är större än det som faktiskt syns — beskurna eller för högupplösta."""
+    bilder = [r for r in a.resurser if r.har_bildatgard and not r.dold_orsak]
+    if not bilder:
+        return []
+    vinst = sum(r.storlek - int(r.storlek * r.pixelandel) for r in bilder)
+    beskurna = [r for r in bilder if r.beskuren_andel >= BESKURET_TROSKEL]
+    namn = antal(len(bilder), "bild", "bilder")
+    if beskurna and len(beskurna) == len(bilder):
+        rubrik = f"Beskär {namn} till det som syns i annonsen"
+    elif beskurna:
+        rubrik = f"Beskär och skala ner {namn}"
+    else:
+        rubrik = f"Skala ner {namn} till rätt pixelmått"
+
+    rader = []
+    for r in sorted(bilder, key=lambda x: -x.storlek):
+        if r.beskuren_andel >= BESKURET_TROSKEL:
+            rader.append(
+                f"{r.filnamn}: {r.nat_b}×{r.nat_h} px, men rutan på {r.vis_b}×{r.vis_h} px "
+                f"visar bara {r.synlig_b}×{r.synlig_h} px av den — "
+                f"{procent(r.beskuren_andel, 1)} klipps bort. "
+                f"Exportera som {r.mal_b}×{r.mal_h} px."
+            )
+        else:
+            rader.append(
+                f"{r.filnamn}: {r.nat_b}×{r.nat_h} px visas som {r.vis_b}×{r.vis_h} px. "
+                f"Exportera som {r.mal_b}×{r.mal_h} px."
+            )
+
+    varfor = (
+        "BannerBoo lägger bilden så att den fyller rutan och klipper bort det som sticker "
+        "utanför. De bortklippta pixlarna laddas ändå — de syns bara aldrig."
+        if beskurna
+        else "Bilderna är större än de visas. Webbläsaren skalar ner dem, men de extra "
+        "pixlarna laddas ändå."
+    )
+    return [
+        Rad(
+            rubrik=rubrik,
+            varfor=varfor,
+            gor=rader
+            + [
+                "Beskär och exportera i ert bildprogram innan ni laddar upp bilden i BannerBoo.",
+                f"Måtten utgår från {NETTHINNA:.0f}× visningsytan, vilket räcker även på "
+                "skärmar med hög upplösning.",
+            ],
+            sparar=max(vinst, 0),
+            allvar="hög" if vinst > 50 * KB else "medel",
+            ansvar="ni",
+        )
+    ]
+
+
+@regel(98)
+def rad_dolda_resurser(a: "Analys") -> list[Rad]:
+    dolda = [r for r in a.resurser if r.dold_orsak]
+    if not dolda:
+        return []
+    vikt = sum(r.storlek for r in dolda)
+    return [
+        Rad(
+            rubrik=f"Radera {antal(len(dolda), 'dolt lager', 'dolda lager')} i BannerBoo",
+            varfor=(
+                "Lager som är gömda i BannerBoo laddar ändå sina bilder. Besökaren betalar "
+                f"för {fmt(vikt)} som aldrig syns."
+            ),
+            gor=[
+                "Radera lagret i stället för att dölja det: "
+                + "; ".join(f"{r.filnamn} ({fmt(r.storlek)})" for r in dolda),
+                "Behöver ni lagret i en annan variant av annonsen: gör en kopia av "
+                "annonsen för den varianten, i stället för att dölja lagret.",
+            ],
+            sparar=vikt,
+            allvar="hög" if vikt > 30 * KB else "medel",
+            ansvar="ni",
+        )
+    ]
+
+
+@regel(95)
+def rad_typsnitt_i_annonsen(a: "Analys") -> list[Rad]:
+    """Fler än två typsnitt. Orden i de övriga görs bättre som SVG."""
+    grupper = typsnitt_per_familj(a)
+    if len(grupper) < 3:
+        return []
+    hus = husets_typsnitt(a)
+    extra = [(fam, g) for fam, g in grupper.items() if fam not in hus]
+    vinst = sum(max(0, g["vikt"] - SVG_ORD_BYTE) for _fam, g in extra)
+    typsnittsvikt = sum(g["vikt"] for g in grupper.values())
+
+    gor = []
+    for fam, g in sorted(grupper.items(), key=lambda x: -x[1]["vikt"]):
+        anvands = (
+            f" till \"{g['text']}\" — {antal(g['unika'], 'tecken', 'tecken')}"
+            if g["text"]
+            else ""
+        )
+        roll = "behåll" if fam in hus else "gör orden som SVG"
+        gor.append(f"{fam}, {fmt(g['vikt'])}{anvands}: {roll}")
+    gor += [
+        "Ord i ett typsnitt ni inte behåller: skriv dem i ert designverktyg, konvertera "
+        "texten till konturer och ladda upp som SVG i BannerBoo. Då väger de ett par kB "
+        "i stället för ett helt typsnitt.",
+        "Bestäm två husteckensnitt för alla era annonser. Då delar annonserna nedladdning "
+        "när flera ligger på samma sida.",
+    ]
+    woff = sorted(fam for fam, g in grupper.items() if g["format"] & {"woff", "woff2"})
+    ttf = sorted(fam for fam, g in grupper.items() if g["format"] & {"ttf", "otf"})
+    if woff and ttf:
+        gor.append(
+            f"Välj helst snitt som BannerBoo levererar som woff — i den här annonsen "
+            f"{', '.join(woff)}. De är klart lättare än de som kommer som ttf."
+        )
+
+    andel = typsnittsvikt / (a.totalvikt or 1)
+    return [
+        Rad(
+            rubrik=f"Använd högst två typsnitt — annonsen laddar {len(grupper)}",
+            varfor=(
+                "Varje typsnitt laddas i sin helhet, med hundratals tecken, även när "
+                "annonsen bara använder några få."
+                + (
+                    f" Här står typsnitten för {procent(andel, 1)} av annonsens vikt."
+                    if andel >= 0.3
+                    else ""
+                )
+            ),
+            gor=gor,
+            sparar=vinst,
+            allvar="kritisk" if vinst > 150 * KB else ("hög" if vinst > 50 * KB else "medel"),
+            ansvar="ni",
+        )
+    ]
+
+
+@regel(92)
+def rad_bildkomprimering(a: "Analys") -> list[Rad]:
+    bilder = [
+        r
+        for r in a.resurser
+        if r.kategori == "bild" and r.underformat in ("jpeg", "png") and not r.dold_orsak
+    ]
+    if not bilder:
+        return []
+    rader, vinst = [], 0
+    for r in sorted(bilder, key=lambda x: -x.storlek):
+        faktor = FAKTOR_JPEG_KOMPRIMERING if r.underformat == "jpeg" else FAKTOR_PNG_KOMPRIMERING
+        efter_matt = int(r.storlek * r.pixelandel)
+        efter = int(efter_matt * faktor)
+        # Bara det komprimeringen ger. Beskärningen räknas i sitt eget råd.
+        vinst += efter_matt - efter
+        tillagg = " efter beskärning och komprimering" if r.har_bildatgard else ""
+        rader.append(
+            f"{r.filnamn} ({r.underformat.upper()}, {fmt(r.storlek)}) → ungefär {fmt(efter)}{tillagg}"
+        )
+    if vinst < 3 * KB:
+        return []
+    return [
+        Rad(
+            rubrik="Komprimera bilderna innan ni laddar upp dem",
+            varfor=(
+                ("Bilden" if len(bilder) == 1 else f"De {len(bilder)} bilderna")
+                + " kan bli betydligt mindre utan någon synlig skillnad."
+            ),
+            gor=rader
+            + [
+                "Kör bilderna genom Squoosh (squoosh.app) eller TinyPNG innan ni laddar "
+                "upp dem i BannerBoo.",
+                "Foton klarar sig bra med JPEG-kvalitet 75–82. Bilder med stora enfärgade "
+                "ytor blir ofta minst som PNG med färre färger.",
+                "Tar BannerBoo emot WebP blir bilderna ännu mindre.",
+            ],
+            sparar=vinst,
+            allvar="hög" if vinst > 50 * KB else "medel",
+            ansvar="ni",
+        )
+    ]
+
+
+@regel(80)
+def rad_animationslangd(a: "Analys") -> list[Rad]:
+    if a.anim_sekunder is None:
+        return []
+    problem = []
+    if a.anim_sekunder > IAB_ANIM_SEK:
+        problem.append(
+            f"den är {a.anim_sekunder:.1f} s lång, IAB rekommenderar högst "
+            f"{IAB_ANIM_SEK:.0f} s".replace(".", ",", 1)
+        )
+    if a.anim_loopar == 0:
+        problem.append("den loopar i all oändlighet")
+    elif a.anim_loopar and a.anim_loopar > IAB_LOOPAR:
+        problem.append(f"den spelas {a.anim_loopar} gånger")
+    if not problem:
+        return []
+    return [
+        Rad(
+            rubrik=f"Låt animationen stanna efter {IAB_LOOPAR} varv",
+            varfor=(
+                "Det här handlar inte om nedladdning utan om processor och batteri: "
+                + " och ".join(problem)
+                + "."
+            ),
+            gor=[
+                f"Ställ in antalet uppspelningar i BannerBoos animationsinställningar. "
+                f"{IAB_LOOPAR} räcker, och IAB rekommenderar inte fler.",
+                "Låt annonsen landa på en slutbild med budskap och knapp.",
+                "En animation som aldrig tar slut håller webbläsaren sysselsatt så länge "
+                "sidan är öppen — det märks på mobilens batteri.",
+                "Budskapet bör gå att läsa redan i första bildrutan; många ser annonsen i "
+                "mindre än tre sekunder.",
+            ],
+            sparar=0,
+            allvar="medel",
+            ansvar="ni",
+        )
+    ]
+
+
+@regel(75)
+def rad_antal_forfragningar(a: "Analys") -> list[Rad]:
+    if len(a.resurser) <= 15:
+        return []
+    return [
+        Rad(
+            rubrik=f"Annonsen gör {len(a.resurser)} förfrågningar",
+            varfor=(
+                "Varje förfrågan har en fast kostnad i väntetid. På ett svagt mobilnät "
+                "väger antalet ofta tyngre än storleken."
+            ),
+            gor=[
+                "Varje uppladdad bild och varje typsnitt är en egen förfrågan. Färre lager "
+                "och färre typsnitt minskar antalet.",
+                "Enkla former och ikoner kan göras med BannerBoos egna SVG-element i stället "
+                "för som uppladdade bilder — de ligger då direkt i annonsen.",
+            ],
+            sparar=0,
+            allvar="låg",
+            ansvar="ni",
+        )
+    ]
+
+
+@regel(70)
+def rad_over_budget(a: "Analys") -> list[Rad]:
+    if a.totalvikt <= IAB_INITIAL:
+        return []
+    over = a.totalvikt - IAB_INITIAL
+    return [
+        Rad(
+            rubrik=f"Annonsen väger {fmt(a.totalvikt)} — {fmt(over)} över riktvärdet",
+            varfor=(
+                f"IAB:s riktvärde för en annons är {fmt(IAB_INITIAL)}. Flera annonsnätverk "
+                "nedprioriterar tyngre annonser, och på mobilen tar de längre tid att visa."
+            ),
+            gor=[
+                "Tyngsta delarna: "
+                + ", ".join(
+                    f"{r.filnamn} ({fmt(r.storlek)})"
+                    for r in sorted(a.resurser, key=lambda x: -x.storlek)[:3]
+                ),
+                f"Sätt {fmt(IAB_INITIAL)} som mål för era annonser, och mät varje ny annons "
+                "innan den publiceras.",
+            ],
+            sparar=0,
+            allvar="kritisk" if a.totalvikt > 2 * IAB_TOTALT else "hög",
+            ansvar="ni",
+        )
+    ]
+
+
+# ── Det här styrs av BannerBoo och går inte att ändra i annonsen ─────────────
+
+
+@regel(65)
+def rad_typsnitt_format(a: "Analys") -> list[Rad]:
+    ttf = [r for r in a.resurser if r.kategori == "typsnitt" and r.underformat in ("ttf", "otf")]
+    if not ttf:
+        return []
+    vikt = sum(r.storlek for r in ttf)
+    kvar = int(vikt * FAKTOR_TTF_TILL_WOFF2 * FAKTOR_SUBSET)
+    return [
+        Rad(
+            rubrik="BannerBoo levererar typsnitten som ttf",
+            varfor=(
+                f"{antal(len(ttf), 'typsnitt', 'typsnitt')} ({fmt(vikt)}) laddas i "
+                "skrivbordsformatet ttf, med alla tecken för alla språk. Woff2 är ungefär "
+                "45 % mindre, och ett typsnitt beskuret till de tecken som används ännu mindre."
+            ),
+            gor=[
+                "Be BannerBoo leverera typsnitten som woff2.",
+                "Be dem också beskära typsnitten till de tecken som faktiskt används i "
+                "annonsen (subsetting).",
+                "Det gör alla era annonser lättare på en gång, utan att någon av dem behöver "
+                "göras om.",
+            ],
+            sparar=vikt - kvar,
+            allvar="medel",
+            ansvar="bannerboo",
+        )
+    ]
+
+
+@regel(60)
 def rad_komprimering(a: "Analys") -> list[Rad]:
     okomprimerade = [r for r in a.resurser if r.text_utan_komprimering]
     if not okomprimerade:
@@ -140,392 +489,125 @@ def rad_komprimering(a: "Analys") -> list[Rad]:
     filer = ", ".join(r.filnamn for r in sorted(okomprimerade, key=lambda x: -x.storlek)[:4])
     return [
         Rad(
-            rubrik="Slå på gzip/brotli på servern",
+            rubrik="BannerBoo skickar filer okomprimerade",
             varfor=(
                 f"{antal(len(okomprimerade), 'textfil', 'textfiler')} "
-                f"({fmt(sum(r.storlek for r in okomprimerade))}) "
-                "skickas helt okomprimerade. Det är ren förlust — komprimering kostar "
-                "ingenting i kvalitet."
+                f"({fmt(sum(r.storlek for r in okomprimerade))}) skickas utan komprimering "
+                "från BannerBoos server."
             ),
             gor=[
-                f"Aktivera gzip (helst brotli) för text/html, application/javascript, "
-                f"text/css och image/svg+xml. Berör: {filer}",
-                "Brotli ger ytterligare ~15 % jämfört med gzip på samma innehåll.",
-                "Ligger annonsen hos en leverantör: be dem slå på komprimering, "
-                "det är en serverinställning och inget du behöver bygga om.",
+                "Be BannerBoo slå på gzip eller brotli för HTML, JavaScript, CSS och SVG — "
+                "det är en serverinställning hos dem.",
+                f"Berör: {filer}",
             ],
             sparar=vinst,
-            allvar="kritisk" if vinst > 30 * KB else "hög",
+            allvar="medel",
+            ansvar="bannerboo",
         )
     ]
 
 
-@regel(95)
-def rad_typsnitt_format(a: "Analys") -> list[Rad]:
-    ttf = [r for r in a.resurser if r.kategori == "typsnitt" and r.underformat in ("ttf", "otf")]
-    if not ttf:
-        return []
-    vikt = sum(r.storlek for r in ttf)
-    kvar = int(vikt * FAKTOR_TTF_TILL_WOFF2 * FAKTOR_SUBSET)
-    return [
-        Rad(
-            rubrik="Byt typsnitten till woff2 och skär bort oanvända tecken",
-            varfor=(
-                f"{antal(len(ttf), 'typsnitt laddas', 'typsnitt laddas')} som "
-                f"{'/'.join(sorted({r.underformat for r in ttf}))} ({fmt(vikt)}). Det är "
-                "skrivbordsformat med alla tecken för alla språk — en banner använder "
-                "oftast under 40 tecken. Tyngst: "
-                + ", ".join(f"{r.filnamn} ({fmt(r.storlek)})"
-                            for r in sorted(ttf, key=lambda x: -x.storlek)[:2])
-                + "."
-            ),
-            gor=[
-                "Konvertera till woff2 (~45 % mindre direkt, stöds av alla webbläsare "
-                "som är relevanta idag).",
-                "Subsetta till de tecken som faktiskt står i annonsen, t.ex. "
-                "`pyftsubset font.ttf --text=\"Robusta IT-avtal\" --flavor=woff2`.",
-                "Behåll `font-display: swap` så texten syns direkt även om snittet dröjer.",
-                f"Uppskattat resultat: {fmt(vikt)} → ca {fmt(kvar)}.",
-            ],
-            sparar=vikt - kvar,
-            allvar="kritisk" if vikt > 100 * KB else "hög",
-        )
-    ]
-
-
-@regel(90)
-def rad_for_manga_familjer(a: "Analys") -> list[Rad]:
-    familjer = sorted(a.typsnitt_laddade)
-    if len(familjer) < 3:
-        return []
-    tunga = sorted(
-        [r for r in a.resurser if r.kategori == "typsnitt"], key=lambda r: -r.storlek
-    )
-    kandidat = sum(r.storlek for r in tunga[2:])
-    return [
-        Rad(
-            rubrik=f"Minska antalet typsnittsfamiljer från {len(familjer)} till högst två",
-            varfor=(
-                f"Annonsen laddar {len(familjer)} olika familjer: {', '.join(familjer)}. "
-                "Varje familj är en egen nedladdning, och på 600×300 px syns knappast "
-                "skillnaden mellan dem."
-            ),
-            gor=[
-                "Välj ett snitt för rubrik och ett för brödtext — resten ersätts.",
-                "Dekorativa snitt som bara används på ett par ord kan ofta ritas som "
-                "SVG-text i stället, då försvinner nedladdningen helt.",
-                "Systemsnitt (Arial, Georgia, Tahoma) kostar noll byte om de duger.",
-            ],
-            sparar=kandidat,
-            allvar="hög" if kandidat > 50 * KB else "medel",
-        )
-    ]
-
-
-@regel(88)
+@regel(55)
 def rad_deklarerade_snitt(a: "Analys") -> list[Rad]:
     if a.typsnitt_deklarerade <= len(a.typsnitt_laddade) + 3:
         return []
-    doc = max(
-        (r for r in a.resurser if r.kategori == "dokument"),
-        key=lambda r: r.storlek,
-        default=None,
-    )
     extra = a.typsnitt_deklarerade - len(a.typsnitt_laddade)
-    # ~180 byte per @font-face-deklaration i dokumentet
-    vinst = min(int(extra * 180), int(doc.storlek * 0.4) if doc else 0)
     return [
         Rad(
-            rubrik=f"Rensa {extra} oanvända @font-face-deklarationer ur dokumentet",
+            rubrik=f"BannerBoos mall deklarerar {extra} typsnitt som aldrig används",
             varfor=(
-                f"Dokumentet deklarerar {a.typsnitt_deklarerade} typsnittsskärningar men bara "
-                f"{len(a.typsnitt_laddade)} används. Filerna hämtas visserligen inte, men "
-                "deklarationerna ligger kvar som död vikt i HTML-koden och måste parsas."
+                f"Annonsens kod beskriver {a.typsnitt_deklarerade} typsnittsvarianter men "
+                f"bara {len(a.typsnitt_laddade)} används. Filerna hämtas inte, men "
+                "beskrivningarna ligger kvar i koden."
             ),
             gor=[
-                "Låt bannerverktyget bara skriva ut de skärningar som annonsen faktiskt "
-                "använder — resten är mall-skräp.",
-                "Är det en tredjepartsgenerator: rapportera det, det drabbar alla deras kunder.",
+                "Det ligger i BannerBoos mall och går inte att ändra i annonsen.",
+                "Värt att nämna för BannerBoo, eftersom det gäller alla annonser som byggs där.",
             ],
-            sparar=max(vinst, 0),
+            sparar=0,
             allvar="låg",
+            ansvar="bannerboo",
         )
     ]
 
 
-@regel(85)
-def rad_dolda_resurser(a: "Analys") -> list[Rad]:
-    dolda = [r for r in a.resurser if r.dold_orsak]
-    if not dolda:
-        return []
-    vikt = sum(r.storlek for r in dolda)
-    rader = [f"{r.filnamn} ({fmt(r.storlek)}, {r.dold_orsak})" for r in dolda]
-    return [
-        Rad(
-            rubrik=f"Ta bort {antal(len(dolda), 'resurs', 'resurser')} som laddas men aldrig syns",
-            varfor=(
-                "Element som är dolda med visibility:hidden eller opacity:0 laddar ändå "
-                "sina bilder. Besökaren betalar för byte som aldrig visas."
-            ),
-            gor=[
-                "Radera lagret ur annonsen i stället för att dölja det: " + "; ".join(rader),
-                "Behövs lagret för en variant — bygg en separat annons, dölj det inte.",
-                "Ska det visas senare i animationen: ladda det med display:none och "
-                "sätt in det via JS när det behövs.",
-            ],
-            sparar=vikt,
-            allvar="hög" if vikt > 30 * KB else "medel",
-        )
-    ]
-
-
-@regel(80)
-def rad_overdimensionerade_bilder(a: "Analys") -> list[Rad]:
-    stora = [r for r in a.resurser if r.overdim_faktor and r.overdim_faktor > 1.15]
-    if not stora:
-        return []
-    vinst = sum(r.storlek - int(r.storlek / (r.overdim_faktor**2)) for r in stora)
-    rader = [
-        f"{r.filnamn}: {r.nat_b}×{r.nat_h} px levereras, visas som {r.vis_b}×{r.vis_h} px "
-        f"→ skala till {int(r.vis_b * NETTHINNA)}×{int(r.vis_h * NETTHINNA)} px"
-        for r in stora
-    ]
-    return [
-        Rad(
-            rubrik=f"Skala ner {antal(len(stora), 'bild', 'bilder')} till rätt pixelmått",
-            varfor=(
-                "Bilderna levereras större än de visas. Webbläsaren skalar ner dem — "
-                "de extra pixlarna kostar bandbredd utan att synas."
-            ),
-            gor=rader
-            + [
-                f"Tumregel: max {NETTHINNA:.0f}× visningsytan räcker även på retinaskärmar.",
-            ],
-            sparar=max(vinst, 0),
-            allvar="hög" if vinst > 50 * KB else "medel",
-        )
-    ]
-
-
-@regel(78)
-def rad_bildformat(a: "Analys") -> list[Rad]:
-    gamla = [
-        r
-        for r in a.resurser
-        if r.kategori == "bild" and r.underformat in ("jpeg", "png", "gif") and not r.dold_orsak
-    ]
-    if not gamla:
-        return []
-    vinst = 0
-    rader = []
-    for r in sorted(gamla, key=lambda x: -x.storlek):
-        f = {
-            "jpeg": FAKTOR_JPEG_TILL_WEBP,
-            "png": FAKTOR_PNG_TILL_WEBP,
-            "gif": FAKTOR_GIF_TILL_VIDEO,
-        }[r.underformat]
-        v = int(r.storlek * (1 - f))
-        vinst += v
-        rader.append(
-            f"{r.filnamn} ({r.underformat.upper()}, {fmt(r.storlek)}) → WebP ≈ "
-            f"{fmt(int(r.storlek * f))}"
-        )
-    if vinst < 5 * KB:
-        return []
-    return [
-        Rad(
-            rubrik="Konvertera bilderna till WebP (eller AVIF)",
-            varfor=(
-                f"{antal(len(gamla), 'bild ligger', 'bilder ligger')} kvar i {', '.join(sorted({r.underformat.upper() for r in gamla}))}. "
-                "WebP ger samma upplevda kvalitet på klart färre byte och stöds av alla "
-                "webbläsare sedan 2020."
-            ),
-            gor=rader
-            + [
-                "`cwebp -q 80 in.png -o ut.webp` — jämför sedan på skärm, inte i siffror.",
-                "Foton mår bra av kvalitet 75–82; ytor med platta färger kan gå lägre.",
-            ],
-            sparar=vinst,
-            allvar="hög" if vinst > 50 * KB else "medel",
-        )
-    ]
-
-
-@regel(75)
+@regel(50)
 def rad_animationsbibliotek(a: "Analys") -> list[Rad]:
     bib = [r for r in a.resurser if r.bibliotek]
     if not bib:
         return []
     vikt = sum(r.storlek for r in bib)
     namn = ", ".join(sorted({r.bibliotek for r in bib}))
-    enkla = bool(a.animationstyper) and a.animationstyper.issubset(ENKLA_ANIMATIONER)
     return [
         Rad(
-            rubrik=f"Ersätt {namn} med CSS-animation",
+            rubrik=f"BannerBoo laddar {namn} i varje annons",
             varfor=(
-                f"{namn} väger {fmt(vikt)} och laddas för varje visning."
-                + (
-                    " Animationerna i annonsen är rena in/ut-toningar och förflyttningar — "
-                    "sådant klarar CSS utan en enda rad JavaScript."
-                    if enkla
-                    else " Kontrollera om animationerna verkligen kräver ett helt bibliotek."
-                )
+                f"{namn} ({fmt(vikt)}) hämtas från ett externt CDN för varje annons, "
+                "oavsett hur enkel animationen är."
             ),
             gor=[
-                "@keyframes + transform/opacity ger samma resultat, körs på GPU och "
-                "kostar 0 byte extra.",
-                "Behövs tidslinjestyrning: Web Animations API finns inbyggt i webbläsaren.",
-                "Måste biblioteket vara kvar: importera bara de moduler du använder och "
-                "lägg filen i annonsbundeln i stället för att hämta den från ett externt CDN "
-                "— då slipper du en extra DNS- och TLS-runda före första bildrutan.",
+                "Det styrs av BannerBoo och går inte att välja bort i annonsen.",
+                "Enklare animationer gör inte filen mindre — den laddas ändå.",
             ],
-            sparar=vikt,
-            allvar="hög" if vikt > 40 * KB else "medel",
-            valfritt=True,
+            sparar=0,
+            allvar="låg",
+            ansvar="bannerboo",
         )
     ]
 
 
-@regel(70)
+@regel(45)
 def rad_tredjepart(a: "Analys") -> list[Rad]:
     tp = [r for r in a.resurser if r.tredjepart and not r.bibliotek]
-    if not tp:
+    sparning = [r for r in a.resurser if r.sparning and r.storlek > 0]
+    if not tp and not sparning:
         return []
-    vikt = sum(r.storlek for r in tp)
     varder = sorted({urllib.parse.urlparse(r.url).netloc for r in tp})
-    sparning = [r for r in tp if r.sparning]
-    gor = [
-        "Varje extern värd kostar DNS-uppslag, TCP-handskakning och TLS innan en "
-        "enda byte av innehåll hämtas — ofta 100–300 ms.",
-        f"Externa värdar just nu: {', '.join(varder)}.",
-    ]
+    gor = []
+    if varder:
+        gor.append(f"Externa värdar: {', '.join(varder)}.")
     if sparning:
         gor.append(
-            f"Spårskript: {', '.join(r.filnamn for r in sparning)}. Kontrollera att det "
-            "verkligen används och att det är förenligt med er samtyckeshantering."
+            f"BannerBoos spårskript: {', '.join(r.filnamn for r in sparning)}. "
+            "Kontrollera att det stämmer med samtyckeshanteringen på er sajt."
         )
+    gor.append("Det styrs av BannerBoo och går inte att ändra i annonsen.")
     return [
         Rad(
-            rubrik=f"Se över {antal(len(tp), 'anrop', 'anrop')} till externa värdar",
+            rubrik="Annonsen hämtar filer från andra värdar än BannerBoo",
             varfor=(
-                f"Annonsen hämtar {fmt(vikt)} från {len(varder)} externa domäner utöver "
-                "själva annonsservern."
+                "Varje extra värd kostar uppslag och anslutning innan något alls hämtas — "
+                "ofta 100–300 ms."
             ),
             gor=gor,
-            sparar=sum(r.storlek for r in sparning),
-            allvar="medel",
-            valfritt=True,
+            sparar=0,
+            allvar="låg",
+            ansvar="bannerboo",
         )
     ]
 
 
-@regel(65)
+@regel(40)
 def rad_cache(a: "Analys") -> list[Rad]:
     utan = [r for r in a.resurser if not r.cachebar and r.storlek > 2 * KB]
     if not utan:
         return []
-    vikt = sum(r.storlek for r in utan)
     return [
         Rad(
-            rubrik="Sätt cache-headers på resurser som saknar dem",
+            rubrik="BannerBoo låter inte alla filer cachas",
             varfor=(
-                f"{antal(len(utan), 'resurs', 'resurser')} ({fmt(vikt)}) saknar användbar Cache-Control. "
-                "De hämtas om vid varje visning, även för samma besökare."
+                f"{antal(len(utan), 'fil', 'filer')} "
+                f"({fmt(sum(r.storlek for r in utan))}) hämtas om vid varje visning, även "
+                "för en besökare som redan sett annonsen."
             ),
             gor=[
-                "Filer med hash i namnet kan sättas till "
-                "`Cache-Control: public, max-age=31536000, immutable`.",
-                f"Berör bl.a.: {', '.join(r.filnamn for r in sorted(utan, key=lambda x: -x.storlek)[:4])}",
+                "Be BannerBoo sätta cache-inställningar på filerna.",
+                f"Berör bland annat: "
+                f"{', '.join(r.filnamn for r in sorted(utan, key=lambda x: -x.storlek)[:4])}",
             ],
             sparar=0,
             allvar="låg",
-        )
-    ]
-
-
-@regel(60)
-def rad_animationslangd(a: "Analys") -> list[Rad]:
-    if a.anim_sekunder is None:
-        return []
-    problem = []
-    if a.anim_sekunder > IAB_ANIM_SEK:
-        problem.append(
-            f"animationen är {a.anim_sekunder:.1f} s, IAB rekommenderar högst "
-            f"{IAB_ANIM_SEK:.0f} s"
-        )
-    if a.anim_loopar == 0:
-        problem.append("den loopar oändligt — IAB rekommenderar högst 3 loopar")
-    elif a.anim_loopar and a.anim_loopar > IAB_LOOPAR:
-        problem.append(f"den loopar {a.anim_loopar} gånger, rekommendationen är {IAB_LOOPAR}")
-    if not problem:
-        return []
-    return [
-        Rad(
-            rubrik="Korta animationen och stoppa den oändliga loopen",
-            varfor=(
-                "Det här är inte bandbredd utan CPU och batteri: " + ", ".join(problem) + "."
-            ),
-            gor=[
-                f"Sätt annonsen att stanna efter {IAB_LOOPAR} loopar och landa på "
-                "en slutbild med budskap och knapp.",
-                "En animation som aldrig tar slut håller renderingstråden vaken hela "
-                "tiden sidan är öppen — det märks tydligt på mobil.",
-                "Budskapet bör vara läsbart redan i första bildrutan; många ser "
-                "annonsen i mindre än tre sekunder.",
-            ],
-            sparar=0,
-            allvar="medel",
-        )
-    ]
-
-
-@regel(55)
-def rad_antal_forfragningar(a: "Analys") -> list[Rad]:
-    if len(a.resurser) <= 15:
-        return []
-    return [
-        Rad(
-            rubrik=f"Minska antalet förfrågningar ({len(a.resurser)} stycken)",
-            varfor=(
-                "Varje förfrågan har en fast kostnad i latens. På 3G eller ett svagt "
-                "mobilnät väger antalet ofta tyngre än byten."
-            ),
-            gor=[
-                "Bädda in små bilder och SVG direkt i HTML-koden som data-URI eller inline "
-                "SVG — under ~2 kB lönar det sig nästan alltid.",
-                "Slå ihop CSS och JS till en fil.",
-                "Ligger allt i samma bundle kan hela annonsen levereras i ett svar.",
-            ],
-            sparar=0,
-            allvar="låg",
-        )
-    ]
-
-
-@regel(50)
-def rad_over_budget(a: "Analys") -> list[Rad]:
-    if a.totalvikt <= IAB_INITIAL:
-        return []
-    over = a.totalvikt - IAB_INITIAL
-    return [
-        Rad(
-            rubrik=f"Totalvikten ligger {fmt(over)} över IAB:s budget",
-            varfor=(
-                f"Annonsen väger {fmt(a.totalvikt)}. IAB:s riktvärde för initial laddning "
-                f"är {fmt(IAB_INITIAL)}, och flera annonsnätverk avvisar eller "
-                "nedprioriterar kreativ som ligger långt över."
-            ),
-            gor=[
-                "Tyngsta delarna först: "
-                + ", ".join(
-                    f"{r.filnamn} ({fmt(r.storlek)})"
-                    for r in sorted(a.resurser, key=lambda x: -x.storlek)[:3]
-                ),
-                "Går annonsen inte att få under budget: dela upp i initial last "
-                "(första bildrutan) och subload (resten, efter sidans onload).",
-            ],
-            sparar=0,
-            allvar="kritisk" if a.totalvikt > 2 * IAB_TOTALT else "hög",
+            ansvar="bannerboo",
         )
     ]
 
@@ -557,11 +639,22 @@ class Resurs:
     nat_h: int = 0
     vis_b: int = 0
     vis_h: int = 0
-    overdim_faktor: float = 0.0
+    overdim_faktor: float = 0.0  # kvar för JSON-läsare; se mal_b/mal_h
+    passning: str = ""  # background-size eller object-fit: cover, contain, 100% 100% …
+    synlig_b: int = 0  # den del av bilden som faktiskt syns, i bildens egna pixlar
+    synlig_h: int = 0
+    mal_b: int = 0  # rekommenderat exportmått
+    mal_h: int = 0
+    beskuren_andel: float = 0.0  # andel av bildens pixlar som klipps bort av rutan
     dold_orsak: str = ""
-    miniatyr: str = ""  # PNG som base64, för förhandsgranskning i fönstret
+    miniatyr: str = ""  # PNG som base64 — bilden, eller ett textprov för typsnitt
+    # typsnittsspecifikt
+    typsnitt_familj: str = ""
+    typsnitt_text: str = ""  # texten annonsen sätter i typsnittet
+    unika_tecken: int = 0
     # räknat
-    potential: int = 0  # rimlig storlek efter åtgärd
+    potential: int = 0  # om både ni och BannerBoo åtgärdar det som går
+    potential_egen: int = 0  # om ni åtgärdar det ni själva kan
 
     @property
     def filnamn(self) -> str:
@@ -573,6 +666,31 @@ class Resurs:
         if len(namn) > 32:
             namn = namn[:17] + "…" + namn[-14:]
         return namn
+
+    @property
+    def pixelandel(self) -> float:
+        """Andel av bildens pixlar som behövs. 1.0 om inget är känt."""
+        if not (self.nat_b and self.nat_h and self.mal_b and self.mal_h):
+            return 1.0
+        return min(1.0, (self.mal_b * self.mal_h) / (self.nat_b * self.nat_h))
+
+    @property
+    def har_bildatgard(self) -> bool:
+        return self.kategori == "bild" and (1.0 - self.pixelandel) >= BILD_TROSKEL
+
+    @property
+    def bildatgard(self) -> str:
+        """Kort anmärkning om vad som bör göras med bilden, eller tom sträng."""
+        if not self.har_bildatgard:
+            return ""
+        beskar = self.beskuren_andel >= BESKURET_TROSKEL
+        skala = self.synlig_b > self.mal_b or self.synlig_h > self.mal_h
+        verb = (
+            "beskär och skala till" if beskar and skala
+            else "beskär till" if beskar
+            else "skala till"
+        )
+        return f"{self.nat_b}×{self.nat_h} → {verb} {self.mal_b}×{self.mal_h} px"
 
     @property
     def text_utan_komprimering(self) -> bool:
@@ -611,6 +729,10 @@ class Analys:
     @property
     def potentialvikt(self) -> int:
         return sum(r.potential for r in self.resurser)
+
+    @property
+    def potential_egen(self) -> int:
+        return sum(r.potential_egen for r in self.resurser)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -789,21 +911,27 @@ async () => {
   };
 
   const bilder = new Map();
-  const notera = (url, el) => {
+  // passning avgör hur mycket av bilden som syns: cover klipper, contain gör det inte.
+  const notera = (url, el, passning) => {
     if (!url || url.startsWith('data:')) return;
     const r = el.getBoundingClientRect();
     const b = Math.round(r.width), h = Math.round(r.height);
-    const f = bilder.get(url) || { url, vis_b: 0, vis_h: 0, dold: doldOrsak(el) };
-    if (b * h > f.vis_b * f.vis_h) { f.vis_b = b; f.vis_h = h; }
+    const f = bilder.get(url) || { url, vis_b: 0, vis_h: 0, dold: doldOrsak(el), passning };
+    if (b * h > f.vis_b * f.vis_h) { f.vis_b = b; f.vis_h = h; f.passning = passning; }
     if (!doldOrsak(el)) f.dold = '';
     bilder.set(url, f);
   };
+  const forstaLagret = v => String(v || '').split(',')[0].trim();
 
-  document.querySelectorAll('img').forEach(im => notera(abs(im.currentSrc || im.src), im));
+  document.querySelectorAll('img').forEach(im =>
+    notera(abs(im.currentSrc || im.src), im, getComputedStyle(im).objectFit || 'fill'));
   document.querySelectorAll('*').forEach(el => {
     const cs = getComputedStyle(el);
-    [cs.backgroundImage, cs.maskImage, cs.webkitMaskImage, cs.borderImageSource,
-     cs.content, cs.listStyleImage].forEach(v => urlerUr(v).forEach(u => notera(u, el)));
+    urlerUr(cs.backgroundImage).forEach(u => notera(u, el, forstaLagret(cs.backgroundSize)));
+    urlerUr(cs.maskImage || cs.webkitMaskImage).forEach(u =>
+      notera(u, el, forstaLagret(cs.maskSize || cs.webkitMaskSize || 'auto')));
+    [cs.borderImageSource, cs.content, cs.listStyleImage].forEach(v =>
+      urlerUr(v).forEach(u => notera(u, el, 'auto')));
   });
 
   // En visningsbar kopia: Tk klarar bara PNG, annonser innehåller jpeg och svg.
@@ -846,11 +974,82 @@ async () => {
     vikt: f.weight, stil: f.style, status: f.status
   }));
 
+  // ── Typsnitten: vilken fil hör till vilket snitt, och vilken text står i det ──
+  const rensaFamilj = v => String(v || '').replace(/^["']|["']$/g, '').trim();
+  const regler = [];
+  for (const blad of document.styleSheets) {
+    let lista;
+    try { lista = blad.cssRules; } catch (e) { continue; }  // blad från annan domän
+    for (const regel of lista) {
+      if (!(regel instanceof CSSFontFaceRule)) continue;
+      const src = regel.style.getPropertyValue('src') || '';
+      regler.push({
+        familj: rensaFamilj(regel.style.getPropertyValue('font-family')),
+        vikt: (regel.style.getPropertyValue('font-weight') || '400').trim(),
+        stil: (regel.style.getPropertyValue('font-style') || 'normal').trim(),
+        urler: Array.from(src.matchAll(/url\((["']?)([^"')]+)\1\)/g)).map(m => abs(m[2])),
+      });
+    }
+  }
+
+  // Bara synlig text — stilblad, skript och sidtitel står också i dokumentet.
+  const textPerFamilj = {};
+  const inteText = new Set(['SCRIPT', 'STYLE', 'TITLE', 'NOSCRIPT', 'TEMPLATE']);
+  for (const el of document.querySelectorAll('body *')) {
+    if (inteText.has(el.tagName)) continue;
+    const egen = [...el.childNodes].filter(n => n.nodeType === 3)
+      .map(n => n.textContent).join('').trim();
+    if (!egen) continue;
+    const fam = rensaFamilj(getComputedStyle(el).fontFamily.split(',')[0]);
+    textPerFamilj[fam] = ((textPerFamilj[fam] || '') + ' ' + egen).trim();
+  }
+
+  // Bara snitt som redan laddats ritas. Att be om ett oladdat snitt skulle hämta
+  // en fil till — och den skulle hamna i mätningen som om annonsen laddat den.
+  const PROVRAD = 'Aa Bb Cc Åå Ää Öö 0123456789';
+  const typsnittsprov = [];
+  const laddade = [];
+  document.fonts.forEach(f => { if (f.status === 'loaded') laddade.push(f); });
+  for (const f of laddade) {
+    const fam = rensaFamilj(f.family);
+    const kandidater = regler.filter(r => r.familj === fam && r.stil === f.style);
+    if (!kandidater.length) continue;
+    const onskad = parseInt(f.weight) || 400;
+    kandidater.sort((x, y) =>
+      Math.abs((parseInt(x.vikt) || 400) - onskad) - Math.abs((parseInt(y.vikt) || 400) - onskad));
+    const text = (textPerFamilj[fam] || '').replace(/\s+/g, ' ').trim();
+    const tecken = new Set(text.replace(/\s/g, '')).size;
+    let png = '';
+    try {
+      const snittet = `${f.style} ${f.weight} `;
+      const rad1 = text.slice(0, 42) || fam;
+      const duk = document.createElement('canvas');
+      let c = duk.getContext('2d');
+      c.font = `${snittet}46px "${fam}"`;
+      const b1 = c.measureText(rad1).width;
+      c.font = `${snittet}26px "${fam}"`;
+      const b2 = c.measureText(PROVRAD).width;
+      duk.width = Math.min(960, Math.ceil(Math.max(b1, b2)) + 36);
+      duk.height = 120;
+      c = duk.getContext('2d');  // storleksbytet nollställer duken
+      c.fillStyle = '#1c1a17';
+      c.font = `${snittet}46px "${fam}"`;
+      c.fillText(rad1, 18, 56);
+      c.fillStyle = '#6b6560';
+      c.font = `${snittet}26px "${fam}"`;
+      c.fillText(PROVRAD, 18, 100);
+      png = duk.toDataURL('image/png');
+    } catch (e) {}
+    typsnittsprov.push({ urler: kandidater[0].urler, familj: fam, vikt: f.weight,
+                         stil: f.style, text: text.slice(0, 80), unika: tecken, png });
+  }
+
   return {
     url: location.href,
     titel: document.title,
     bilder: matt,
     snitt,
+    typsnittsprov,
     anvanda: Array.from(anvanda),
     element: document.querySelectorAll('*').length,
     dom_byte: document.documentElement.outerHTML.length
@@ -1110,9 +1309,13 @@ def bygg_analys(kalla, lage, forsta_kropp, rader, sonder, konsol, navfel="") -> 
 
     # Sonddata: pixelmått, visningsmått, dolda lager, typsnittsstatus
     bildinfo: dict[str, dict] = {}
+    prov_per_url: dict[str, dict] = {}
     for s in sonder:
         for b in s.get("bilder", []):
             bildinfo[b["url"]] = b
+        for prov in s.get("typsnittsprov", []):
+            for u in prov.get("urler", []):
+                prov_per_url.setdefault(u, prov)
         for f in s.get("snitt", []):
             if f.get("status") == "loaded":
                 a.typsnitt_laddade.add(f["familj"])
@@ -1165,8 +1368,25 @@ def bygg_analys(kalla, lage, forsta_kropp, rader, sonder, konsol, navfel="") -> 
             r.nat_b, r.nat_h = int(info.get("nat_b") or 0), int(info.get("nat_h") or 0)
             r.vis_b, r.vis_h = int(info.get("vis_b") or 0), int(info.get("vis_h") or 0)
             r.dold_orsak = info.get("dold") or ""
-            if r.nat_b and r.vis_b:
-                r.overdim_faktor = round(r.nat_b / max(r.vis_b * NETTHINNA, 1), 2)
+            r.passning = str(info.get("passning") or "")
+            if r.nat_b and r.nat_h and r.vis_b and r.vis_h:
+                r.synlig_b, r.synlig_h, r.mal_b, r.mal_h = bildens_mal(
+                    r.nat_b, r.nat_h, r.vis_b, r.vis_h, r.passning
+                )
+                r.beskuren_andel = 1.0 - (r.synlig_b * r.synlig_h) / (r.nat_b * r.nat_h)
+                if r.mal_b and r.mal_h:
+                    r.overdim_faktor = round(
+                        ((r.nat_b * r.nat_h) / (r.mal_b * r.mal_h)) ** 0.5, 2
+                    )
+
+        prov = prov_per_url.get(url) if kategori == "typsnitt" else None
+        if prov:
+            r.typsnitt_familj = str(prov.get("familj") or "")
+            r.typsnitt_text = str(prov.get("text") or "")
+            r.unika_tecken = int(prov.get("unika") or 0)
+            png = str(prov.get("png") or "")
+            if png.startswith("data:image/png;base64,"):
+                r.miniatyr = png.split(",", 1)[1]
 
         a.resurser.append(r)
 
@@ -1204,38 +1424,120 @@ def bedom_misslyckande(a: Analys, lage: str, forsta_kropp: str) -> str:
     return ""
 
 
+def bildens_mal(nat_b: int, nat_h: int, vis_b: int, vis_h: int, passning: str):
+    """Hur mycket av bilden syns, och vilket mått borde den exporteras i?
+
+    Returnerar (synlig bredd, synlig höjd, mål-bredd, mål-höjd), allt i bildens
+    egna pixlar. BannerBoo lägger bilder med background-size: cover, som skalar
+    bilden tills den fyller rutan och klipper bort resten.
+    """
+    p = (passning or "").strip().lower()
+    if p == "cover":
+        skala = max(vis_b / nat_b, vis_h / nat_h)
+        synlig_b, synlig_h = min(nat_b, vis_b / skala), min(nat_h, vis_h / skala)
+        visad_b, visad_h = vis_b, vis_h
+    elif p in ("contain", "scale-down"):
+        skala = min(vis_b / nat_b, vis_h / nat_h)
+        if p == "scale-down":
+            skala = min(skala, 1.0)
+        synlig_b, synlig_h = nat_b, nat_h
+        visad_b, visad_h = nat_b * skala, nat_h * skala
+    elif p in ("auto", "auto auto", "none", "initial"):
+        # Naturlig storlek: det som sticker utanför rutan klipps, inget skalas.
+        synlig_b, synlig_h = min(nat_b, vis_b), min(nat_h, vis_h)
+        visad_b, visad_h = synlig_b / NETTHINNA, synlig_h / NETTHINNA
+    else:
+        # fill, 100% 100% och fasta mått: hela bilden sträcks över rutan.
+        synlig_b, synlig_h = nat_b, nat_h
+        visad_b, visad_h = vis_b, vis_h
+    mal_b = min(synlig_b, visad_b * NETTHINNA)
+    mal_h = min(synlig_h, visad_h * NETTHINNA)
+    return round(synlig_b), round(synlig_h), max(1, round(mal_b)), max(1, round(mal_h))
+
+
+def typsnitt_per_familj(a: Analys) -> dict:
+    """familj → filer, vikt, format och den text annonsen sätter i den."""
+    grupper: dict[str, dict] = {}
+    for r in a.resurser:
+        if r.kategori != "typsnitt":
+            continue
+        fam = r.typsnitt_familj or r.filnamn
+        g = grupper.setdefault(
+            fam, {"filer": [], "vikt": 0, "text": "", "unika": 0, "format": set()}
+        )
+        g["filer"].append(r)
+        g["vikt"] += r.storlek
+        g["format"].add(r.underformat)
+        if r.unika_tecken > g["unika"]:
+            g["unika"], g["text"] = r.unika_tecken, r.typsnitt_text
+    return grupper
+
+
+LANG_TEXT_TECKEN = 20  # fler olika tecken än så är löptext, inte ett par ord
+
+
+def husets_typsnitt(a: Analys, antal_att_behalla: int = 2) -> set:
+    """De typsnitt som är värda att behålla som riktiga typsnitt.
+
+    Typsnitt med längre text behålls först — löptext ska inte bli en bild. Bär
+    alla typsnitt bara korta ord avgör vikten i stället: de tunga sparar mest på
+    att göras som SVG, så det är de lätta som behålls.
+    """
+    grupper = typsnitt_per_familj(a)
+
+    def nyckel(post):
+        g = post[1]
+        kort = g["unika"] <= LANG_TEXT_TECKEN
+        return (kort, g["vikt"] if kort else -g["unika"])
+
+    rangordnade = sorted(grupper.items(), key=nyckel)
+    return {fam for fam, _g in rangordnade[:antal_att_behalla]}
+
+
 def berakna_potential(a: Analys) -> None:
-    """Rimlig storlek per resurs efter åtgärd — utan att räkna samma vinst två gånger."""
+    """Rimlig storlek per fil efter åtgärd, i två nivåer och utan dubbelräkning.
+
+    potential_egen — det ni kan göra själva i BannerBoo: radera dolda lager,
+                     beskära, skala och komprimera bilder, göra ord i extra
+                     typsnitt som SVG.
+    potential      — om BannerBoo dessutom komprimerar sina filer och levererar
+                     typsnitten som woff2 med bara de tecken som används.
+    """
+    hus = husets_typsnitt(a)
     for r in a.resurser:
         if r.dold_orsak:
-            r.potential = 0
+            r.potential_egen = r.potential = 0
             continue
-        if r.kategori == "typsnitt":
-            if r.underformat in ("ttf", "otf"):
-                r.potential = int(r.storlek * FAKTOR_TTF_TILL_WOFF2 * FAKTOR_SUBSET)
-            elif r.underformat in ("woff", "woff2"):
-                r.potential = int(r.storlek * FAKTOR_SUBSET)
-            else:
-                r.potential = r.storlek
-            continue
+
         if r.kategori == "bild":
-            skala = 1.0
-            if r.overdim_faktor and r.overdim_faktor > 1.15:
-                skala = 1 / (r.overdim_faktor**2)
-            formatfaktor = {
-                "jpeg": FAKTOR_JPEG_TILL_WEBP,
-                "png": FAKTOR_PNG_TILL_WEBP,
-                "gif": FAKTOR_GIF_TILL_VIDEO,
+            faktor = {
+                "jpeg": FAKTOR_JPEG_KOMPRIMERING,
+                "png": FAKTOR_PNG_KOMPRIMERING,
             }.get(r.underformat, 1.0)
-            if r.underformat == "svg" and not r.komprimering and r.gzip_storlek:
-                r.potential = r.gzip_storlek
+            egen = int(r.storlek * r.pixelandel * faktor)
+            full = egen
+            if r.underformat == "svg" and r.text_utan_komprimering and r.gzip_storlek:
+                full = min(egen, r.gzip_storlek)
+            r.potential_egen, r.potential = egen, full
+            continue
+
+        if r.kategori == "typsnitt":
+            extra = bool(r.typsnitt_familj) and len(hus) >= 2 and r.typsnitt_familj not in hus
+            egen = min(r.storlek, SVG_ORD_BYTE) if extra else r.storlek
+            if r.underformat in ("ttf", "otf"):
+                bannerboo = int(r.storlek * FAKTOR_TTF_TILL_WOFF2 * FAKTOR_SUBSET)
+            elif r.underformat in ("woff", "woff2"):
+                bannerboo = int(r.storlek * FAKTOR_SUBSET)
             else:
-                r.potential = int(r.storlek * skala * formatfaktor)
+                bannerboo = r.storlek
+            r.potential_egen, r.potential = egen, min(egen, bannerboo)
             continue
+
         if r.text_utan_komprimering and r.gzip_storlek:
-            r.potential = r.gzip_storlek
+            r.potential_egen, r.potential = r.storlek, r.gzip_storlek
             continue
-        r.potential = r.storlek
+
+        r.potential_egen = r.potential = r.storlek
 
 
 def satt_betyg(vikt: int) -> tuple[str, str]:
@@ -1252,7 +1554,9 @@ def samla_rad(a: Analys) -> list[Rad]:
             rad.extend(fn(a) or [])
         except Exception as e:
             a.varningar.append(f"rådregeln {fn.__name__} kraschade: {e}")
-    rad.sort(key=lambda r: (-r.sparar, r.valfritt))
+    for r in rad:
+        r.gor = [steg for steg in r.gor if steg]
+    rad.sort(key=_ansvarsnyckel)
     return rad
 
 
@@ -1373,8 +1677,10 @@ def skriv_rapport(a: Analys, rad: list[Rad], visa_alla: bool) -> None:
         anm = []
         if r.dold_orsak:
             anm.append(f"DOLD ({r.dold_orsak})")
-        if r.overdim_faktor and r.overdim_faktor > 1.15:
-            anm.append(f"{r.nat_b}×{r.nat_h}→{r.vis_b}×{r.vis_h} px")
+        if r.bildatgard:
+            anm.append(r.bildatgard)
+        if r.kategori == "typsnitt" and r.unika_tecken:
+            anm.append(f"{r.unika_tecken} tecken används")
         if r.text_utan_komprimering:
             anm.append("okomprimerad")
         if r.bibliotek:
@@ -1397,36 +1703,37 @@ def skriv_rapport(a: Analys, rad: list[Rad], visa_alla: bool) -> None:
     # ── Råd ──────────────────────────────────────────────────────────────────
     p("")
     p("═" * W)
-    p("  RÅD — SORTERADE EFTER EFFEKT")
+    p("  RÅD")
     p("═" * W)
     märke = {"kritisk": "!!!", "hög": "!! ", "medel": "!  ", "låg": "   "}
-    for i, r in enumerate(rad, 1):
-        vinst = f"−{fmt(r.sparar)}" if r.sparar else "—"
-        extra = "  (större ingrepp)" if r.valfritt else ""
+    nummer = 0
+    for rubrik, lista in gruppera_rad(rad):
         p("")
-        p(f"  {i}. {märke.get(r.allvar, '   ')} {r.rubrik}   [{vinst}]{extra}")
-        p(f"      {r.varfor}")
-        for steg in r.gor:
-            p(f"      · {steg}")
+        p(f"  ── {rubrik.upper()} ".ljust(W - 2, "─"))
+        for r in lista:
+            nummer += 1
+            vinst = f"−{fmt(r.sparar)}" if r.sparar else "—"
+            p("")
+            p(f"  {nummer}. {märke.get(r.allvar, '   ')} {r.rubrik}   [{vinst}]")
+            p(f"      {r.varfor}")
+            for steg in r.gor:
+                p(f"      · {steg}")
 
     # ── Prognos ──────────────────────────────────────────────────────────────
     p("")
     p("═" * W)
-    mal = a.potentialvikt
-    valfri_vinst = sum(r.sparar for r in rad if r.valfritt)
-    ny_bokstav, _ = satt_betyg(mal)
+    egen, full = a.potential_egen, a.potentialvikt
     p("  OM RÅDEN GENOMFÖRS")
     p("  " + "─" * (W - 4))
-    p(f"  Nu:              {fmt(a.totalvikt):>10}   betyg {satt_betyg(a.totalvikt)[0]}")
+    p(f"  {'Nu':<34}{fmt(a.totalvikt):>10}   betyg {satt_betyg(a.totalvikt)[0]}")
     p(
-        f"  Efter åtgärd:    {fmt(mal):>10}   betyg {ny_bokstav}   "
-        f"(−{procent(a.totalvikt - mal, a.totalvikt)})"
+        f"  {'Det ni kan göra i BannerBoo':<34}{fmt(egen):>10}   betyg {satt_betyg(egen)[0]}   "
+        f"(−{procent(a.totalvikt - egen, a.totalvikt)})"
     )
-    if valfri_vinst:
-        med_valfritt = max(mal - valfri_vinst, 0)
+    if full < egen:
         p(
-            f"  Med de större ingreppen: {fmt(med_valfritt):>10}   "
-            f"betyg {satt_betyg(med_valfritt)[0]}"
+            f"  {'Om BannerBoo också gör sin del':<34}{fmt(full):>10}   "
+            f"betyg {satt_betyg(full)[0]}   (−{procent(a.totalvikt - full, a.totalvikt)})"
         )
     p("═" * W)
     if a.konsolfel:
@@ -1490,6 +1797,8 @@ HTML_MALL = """<!doctype html>
   .btg{display:inline-block;width:23px;height:23px;border-radius:5px;color:#fff;
        text-align:center;font-weight:700;font-size:13px;line-height:23px}
   .delad{color:var(--a);font-weight:600}
+  h3.ansvar{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--svag);
+     margin:26px 0 4px;border-bottom:1px solid var(--linje);padding-bottom:6px}
   .tumnagel{max-width:54px;max-height:38px;border:1px solid var(--linje);border-radius:3px;
        vertical-align:middle;
        /* Rutmönster: vita och genomskinliga motiv syns inte mot vitt. */
@@ -1503,6 +1812,25 @@ HTML_MALL = """<!doctype html>
 </style></head><body><div class="wrap">
 __INNEHALL__
 </div></body></html>"""
+
+
+def html_rad(rad: list, rubrik: str, e) -> str:
+    """Råden grupperade efter vem som kan göra något åt dem."""
+    if not rad:
+        return ""
+    delar = [f"<h2>{e(rubrik)}</h2>"]
+    nummer = 0
+    for grupprubrik, lista in gruppera_rad(rad):
+        delar.append(f"<h3 class='ansvar'>{e(grupprubrik)}</h3>")
+        for r in lista:
+            nummer += 1
+            vinst = f"<span class='vinst'>−{e(fmt(r.sparar))}</span>" if r.sparar else ""
+            steg = "".join(f"<li>{e(x)}</li>" for x in r.gor)
+            delar.append(
+                f"<div class='rad {r.allvar}'><h3>{nummer}. {e(r.rubrik)}{vinst}</h3>"
+                f"<div class='varfor'>{e(r.varfor)}</div><ul>{steg}</ul></div>"
+            )
+    return "\n".join(delar)
 
 
 def html_innehall(a: Analys, rad: list[Rad], rubrik: str | None = None) -> list[str]:
@@ -1580,10 +1908,10 @@ def html_innehall(a: Analys, rad: list[Rad], rubrik: str | None = None) -> list[
         flaggor = []
         if r.dold_orsak:
             flaggor.append(f"<span class='flagga dold'>dold: {e(r.dold_orsak)}</span>")
-        if r.overdim_faktor and r.overdim_faktor > 1.15:
-            flaggor.append(
-                f"<span class='flagga'>{r.nat_b}×{r.nat_h} → {r.vis_b}×{r.vis_h} px</span>"
-            )
+        if r.bildatgard:
+            flaggor.append(f"<span class='flagga'>{e(r.bildatgard)}</span>")
+        if r.kategori == "typsnitt" and r.unika_tecken:
+            flaggor.append(f"<span class='flagga'>{r.unika_tecken} tecken används</span>")
         if r.text_utan_komprimering:
             flaggor.append("<span class='flagga'>okomprimerad</span>")
         if r.bibliotek:
@@ -1608,24 +1936,14 @@ def html_innehall(a: Analys, rad: list[Rad], rubrik: str | None = None) -> list[
     u.append("</table></div>")
 
     # råd
-    u.append("<h2>Råd</h2>")
-    for i, r in enumerate(rad, 1):
-        vinst = f"<span class='vinst'>−{e(fmt(r.sparar))}</span>" if r.sparar else ""
-        extra = " <span class='flagga'>större ingrepp</span>" if r.valfritt else ""
-        steg = "".join(f"<li>{e(s)}</li>" for s in r.gor)
-        u.append(
-            f"<div class='rad {r.allvar}'><h3>{i}. {e(r.rubrik)}{vinst}{extra}</h3>"
-            f"<div class='varfor'>{e(r.varfor)}</div><ul>{steg}</ul></div>"
-        )
+    u.append(html_rad(rad, "Råd", e))
 
-    mal = a.potentialvikt
-    valfri = sum(r.sparar for r in rad if r.valfritt)
+    egen, full = a.potential_egen, a.potentialvikt
     u.append("<h2>Om råden genomförs</h2><div class='kort prognos'>")
     u.append(f"<div><div class='varfor'>Idag</div><div class='stor'>{e(fmt(a.totalvikt))}</div><div>betyg {satt_betyg(a.totalvikt)[0]}</div></div>")
-    u.append(f"<div><div class='varfor'>Efter åtgärd</div><div class='stor'>{e(fmt(mal))}</div><div>betyg {satt_betyg(mal)[0]} · −{e(procent(a.totalvikt - mal, a.totalvikt))}</div></div>")
-    if valfri:
-        mv = max(mal - valfri, 0)
-        u.append(f"<div><div class='varfor'>Med större ingrepp</div><div class='stor'>{e(fmt(mv))}</div><div>betyg {satt_betyg(mv)[0]}</div></div>")
+    u.append(f"<div><div class='varfor'>Det ni kan göra i BannerBoo</div><div class='stor'>{e(fmt(egen))}</div><div>betyg {satt_betyg(egen)[0]} · −{e(procent(a.totalvikt - egen, a.totalvikt))}</div></div>")
+    if full < egen:
+        u.append(f"<div><div class='varfor'>Om BannerBoo också gör sin del</div><div class='stor'>{e(fmt(full))}</div><div>betyg {satt_betyg(full)[0]} · −{e(procent(a.totalvikt - full, a.totalvikt))}</div></div>")
     u.append("</div>")
     return u
 
@@ -1665,6 +1983,7 @@ def analys_till_dict(a: Analys, rad: list[Rad]) -> dict:
     d["animationstyper"] = sorted(a.animationstyper)
     d["totalvikt"] = a.totalvikt
     d["potentialvikt"] = a.potentialvikt
+    d["potential_egen"] = a.potential_egen
     d["betyg"] = satt_betyg(a.totalvikt)[0]
     d["rad"] = [asdict(r) for r in rad]
     # Avbilderna är till för fönstret. I JSON skulle de svälla filen utan nytta.
@@ -2101,10 +2420,16 @@ def sidregel(prioritet: int):
     return dekorator
 
 
+#  Två sorters sidråd. De som handlar om annonsens plats på sidan gäller även när
+#  sidan bara har en annons. De som jämför annonser med varandra ges bara när det
+#  finns flera — med en enda annons säger dess egna råd redan samma sak, och
+#  "börja med den tyngsta" blir meningslöst.
+
+
 @sidregel(100)
 def sidrad_sidbudget(s: Sidanalys) -> list[Rad]:
     n = len(s.poster)
-    if not n:
+    if n < 2:
         return []
     budget = n * IAB_INITIAL
     unik = s.delad_vikt
@@ -2113,20 +2438,21 @@ def sidrad_sidbudget(s: Sidanalys) -> list[Rad]:
     varsta = max(s.poster, key=lambda p: p[1].totalvikt)
     return [
         Rad(
-            rubrik=f"Sidans annonser väger {fmt(unik)} — {fmt(unik - budget)} över budget",
+            rubrik=f"Sidans {n} annonser väger {fmt(unik)} — {fmt(unik - budget)} över riktvärdet",
             varfor=(
-                f"{antal(n, 'annons', 'annonser')} på sidan ger en budget på {fmt(budget)} "
-                f"({n} × {fmt(IAB_INITIAL)}). Besökaren betalar {fmt(unik)} bara för annonserna, "
-                "utöver sidans eget innehåll."
+                f"Med {n} annonser blir riktvärdet {fmt(budget)} ({n} × {fmt(IAB_INITIAL)}). "
+                f"Besökaren hämtar {fmt(unik)} bara för annonserna, utöver sidans eget innehåll."
             ),
             gor=[
                 f"Börja med den tyngsta: {varsta[0].id} väger {fmt(varsta[1].totalvikt)} "
                 f"(betyg {satt_betyg(varsta[1].totalvikt)[0]}).",
-                "Råden per annons längre ned visar exakt var vikten sitter.",
-                "Sätt ett tak i annonsvillkoren — annonsörer levererar det de får leverera.",
+                "Råden för varje annons längre ned visar exakt var vikten sitter.",
+                f"Sätt {fmt(IAB_INITIAL)} som mål per annons och mät varje ny annons innan "
+                "den publiceras.",
             ],
             sparar=0,
             allvar="kritisk" if unik > 2 * budget else "hög",
+            ansvar="ni",
         )
     ]
 
@@ -2137,26 +2463,33 @@ def sidrad_lat_ladda(s: Sidanalys) -> list[Rad]:
     if not under:
         return []
     vikt = sum(a.totalvikt for _, a in under)
+    en = len(under) == 1
     return [
         Rad(
-            rubrik=f"Skjut upp {antal(len(under), 'annons', 'annonser')} som ligger under vecket",
+            rubrik=(
+                "Ladda annonsen först när besökaren närmar sig den"
+                if en
+                else f"Ladda de {len(under)} annonserna under vecket först när de behövs"
+            ),
             varfor=(
-                f"{fmt(vikt)} laddas direkt fast annonserna sitter längre ned på sidan och "
-                "många besökare aldrig scrollar dit. Vikten konkurrerar med sidans eget "
-                "innehåll om bandbredden i det ögonblick det spelar mest roll."
+                f"{'Annonsen' if en else 'Annonserna'} ligger under vecket men "
+                f"{'laddas' if en else 'laddas alla'} direkt — {fmt(vikt)} som konkurrerar med "
+                "sidans eget innehåll om bandbredden, trots att många besökare aldrig "
+                "scrollar dit."
             ),
             gor=[
-                "Sätt `loading=\"lazy\"` på annonsens iframe — det räcker långt och kostar "
-                "ingen utveckling.",
-                "Vill du ha mer kontroll: låt en IntersectionObserver skjuta in annonskoden "
-                "när platsen närmar sig visningsytan.",
+                "Slå på lazy load för annonsplatsen i Advanced Ads. Pro-tillägget har "
+                "inställningen per placering, och då hämtas annonsen först när den närmar "
+                "sig skärmen.",
             ]
             + [
-                f"Berör: {f.id} på {f.topp_px} px ned ({fmt(a.totalvikt)})"
+                f"Berör {f.id} i {f.plats or 'okänd annonsplats'}, {f.topp_px} px ned på sidan "
+                f"({fmt(a.totalvikt)})"
                 for f, a in under
             ],
             sparar=vikt,
             allvar="hög" if vikt > 300 * KB else "medel",
+            ansvar="sajten",
         )
     ]
 
@@ -2166,31 +2499,37 @@ def sidrad_tung_ovanfor_veck(s: Sidanalys) -> list[Rad]:
     tunga = [(f, a) for f, a, _ in s.poster if f.ovanfor_veck and a.totalvikt > IAB_INITIAL]
     if not tunga:
         return []
+    en = len(tunga) == 1
     return [
         Rad(
-            rubrik=f"{antal(len(tunga), 'annons', 'annonser')} ovanför vecket är tyngre än budget",
+            rubrik=(
+                "Annonsen överst på sidan är tyngre än riktvärdet"
+                if en
+                else f"{len(tunga)} annonser överst på sidan är tyngre än riktvärdet"
+            ),
             varfor=(
                 "Annonser i första skärmbilden laddas samtidigt som sidans huvudinnehåll och "
-                "drar ut på tiden till största innehållselementet ritas (LCP). Det är det "
-                "måttet Google väger in i sökresultaten."
+                "fördröjer när sidan ser färdig ut. Det är ett mått Google väger in i "
+                "sökresultaten."
             ),
             gor=[
-                f"{f.id} ({f.format} px) väger {fmt(a.totalvikt)} — budget är {fmt(IAB_INITIAL)}."
+                f"{f.id} ({f.format} px) väger {fmt(a.totalvikt)} — riktvärdet är {fmt(IAB_INITIAL)}."
                 for f, a in tunga
             ]
             + [
-                "Ska en tung annons ligga högst upp bör den åtminstone vara statisk bild "
-                "i första bildrutan, med animation och typsnitt efterladdade.",
+                "Gör annonsen lättare enligt råden längre ned, eller flytta annonsplatsen "
+                "längre ned på sidan i Advanced Ads.",
             ],
             sparar=0,
             allvar="hög",
+            ansvar="ni",
         )
     ]
 
 
 @sidregel(80)
 def sidrad_typsnittsberg(s: Sidanalys) -> list[Rad]:
-    if not s.poster:
+    if len(s.poster) < 2:
         return []
     unika: dict[str, int] = {}
     familjer: set = set()
@@ -2204,22 +2543,19 @@ def sidrad_typsnittsberg(s: Sidanalys) -> list[Rad]:
         return []
     return [
         Rad(
-            rubrik=f"Typsnitten är sidans tyngsta annonspost: {fmt(vikt)}",
+            rubrik=f"Annonserna på sidan laddar {antal(len(familjer), 'typsnitt', 'typsnitt')} för {fmt(vikt)}",
             varfor=(
-                f"Annonserna hämtar tillsammans {antal(len(unika), 'typsnittsfil', 'typsnittsfiler')} "
-                f"i {antal(len(familjer), 'familj', 'familjer')}: {', '.join(sorted(familjer))}. "
-                "Varje familj är en egen nedladdning som ingen besökare lägger märke till."
+                f"Tillsammans hämtar annonserna {antal(len(unika), 'typsnittsfil', 'typsnittsfiler')} "
+                f"i {antal(len(familjer), 'familj', 'familjer')}: {', '.join(sorted(familjer))}."
             ),
             gor=[
-                "Kom överens med annonsörerna om ett par tillåtna snitt — då delar annonserna "
-                "nedladdning och sidan betalar för dem en gång.",
-                "Kräv woff2 med subsetting i annonsvillkoren; det är den enskilt största "
-                "besparingen och kostar inget i utseende.",
-                "Ligger annonserna hos samma leverantör kan snitten cachas gemensamt om de "
-                "hämtas från samma URL:er.",
+                "Bestäm två husteckensnitt för alla era annonser. Samma typsnitt hämtas från "
+                "samma adress hos BannerBoo, och laddas då bara en gång för hela sidan.",
+                "Råden för varje annons längre ned visar vilka ord som kan göras som SVG i stället.",
             ],
             sparar=0,
             allvar="hög" if vikt > 400 * KB else "medel",
+            ansvar="ni",
         )
     ]
 
@@ -2230,19 +2566,18 @@ def sidrad_ingen_delning(s: Sidanalys) -> list[Rad]:
         return []
     return [
         Rad(
-            rubrik="Annonserna delar nästan inga resurser",
+            rubrik="Annonserna på sidan delar nästan inga filer",
             varfor=(
                 f"Sidans {len(s.poster)} annonser återanvänder bara {fmt(s.vinst_av_delning)} "
-                "mellan sig. Varje annons drar med sig sina egna kopior av bibliotek och "
-                "typsnitt, trots att de ligger på samma sida."
+                "mellan sig. Varje annons drar med sig sina egna typsnitt."
             ),
             gor=[
-                "Låt annonserna hämta gemensamma delar från samma URL:er — då räcker en "
-                "nedladdning för hela sidan.",
-                "Det gäller särskilt animationsbiblioteket och typsnitten.",
+                "Använd samma typsnitt i era annonser. Samma typsnitt från BannerBoo hämtas "
+                "från samma adress och laddas då en gång för hela sidan.",
             ],
             sparar=0,
             allvar="medel",
+            ansvar="ni",
         )
     ]
 
@@ -2254,7 +2589,9 @@ def samla_sidrad(s: Sidanalys) -> list[Rad]:
             rad.extend(fn(s) or [])
         except Exception as fel:
             s.varningar.append(f"sidregeln {fn.__name__} kraschade: {fel}")
-    rad.sort(key=lambda r: (-r.sparar, r.valfritt))
+    for r in rad:
+        r.gor = [steg for steg in r.gor if steg]
+    rad.sort(key=_ansvarsnyckel)
     return rad
 
 
@@ -2345,13 +2682,21 @@ def skriv_sidrapport(s: Sidanalys, visa_alla: bool) -> None:
         p("  RÅD FÖR SIDAN SOM HELHET")
         p("═" * W)
         marke = {"kritisk": "!!!", "hög": "!! ", "medel": "!  ", "låg": "   "}
-        for i, r in enumerate(s.sidrad, 1):
-            vinst = f"−{fmt(r.sparar)}" if r.sparar else "—"
+        nummer = 0
+        for rubrik, lista in gruppera_rad(s.sidrad):
             p("")
-            p(f"  {i}. {marke.get(r.allvar, '   ')} {r.rubrik}   [{vinst}]")
-            p(f"      {r.varfor}")
-            for steg in r.gor:
-                p(f"      · {steg}")
+            p(f"  ── {rubrik.upper()} ".ljust(W - 2, "─"))
+            for r in lista:
+                nummer += 1
+                vinst = f"−{fmt(r.sparar)}" if r.sparar else "—"
+                p("")
+                p(f"  {nummer}. {marke.get(r.allvar, '   ')} {r.rubrik}   [{vinst}]")
+                p(f"      {r.varfor}")
+                for steg in r.gor:
+                    p(f"      · {steg}")
+    if len(s.poster) == 1:
+        p("")
+        p("  Råden för själva annonsen står under annonsen nedan.")
 
     for v in s.varningar:
         p(f"\n  varning: {v}")
@@ -2459,14 +2804,9 @@ def html_sidrapport(s: Sidanalys) -> str:
         u.append("</table></div>")
 
     if s.sidrad:
-        u.append("<h2>Råd för sidan som helhet</h2>")
-        for i, r in enumerate(s.sidrad, 1):
-            vinst = f"<span class='vinst'>−{e(fmt(r.sparar))}</span>" if r.sparar else ""
-            steg = "".join(f"<li>{e(x)}</li>" for x in r.gor)
-            u.append(
-                f"<div class='rad {r.allvar}'><h3>{i}. {e(r.rubrik)}{vinst}</h3>"
-                f"<div class='varfor'>{e(r.varfor)}</div><ul>{steg}</ul></div>"
-            )
+        u.append(html_rad(s.sidrad, "Råd för sidan som helhet", e))
+    if len(s.poster) == 1:
+        u.append("<p class='varfor'>Råden för själva annonsen står under annonsen nedan.</p>")
 
     for fynd, analys, rad in s.poster:
         u.append(f"<div id='annons-{e(fynd.id)}'></div>")
@@ -2632,13 +2972,13 @@ def _main() -> None:
         print("\n" + "═" * 78)
         print("  JÄMFÖRELSE — ALLA MÄTTA ANNONSER")
         print("═" * 78)
-        print(f"  {'Annons':<44}{'Vikt':>12}  {'Betyg':>6}  {'Möjlig':>10}")
+        print(f"  {'Annons':<44}{'Vikt':>12}  {'Betyg':>6}  {'Själva':>10}")
         for a, rad, _ in sorted(
             (r for r in resultat if not r[0].misslyckande), key=lambda x: -x[0].totalvikt
         ):
             print(
                 f"  {a.kalla[-44:]:<44}{fmt(a.totalvikt):>12}  "
-                f"{satt_betyg(a.totalvikt)[0]:>6}  {fmt(a.potentialvikt):>10}"
+                f"{satt_betyg(a.totalvikt)[0]:>6}  {fmt(a.potential_egen):>10}"
             )
         print("")
 

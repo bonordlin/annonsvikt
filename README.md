@@ -217,10 +217,13 @@ installation — tkinter ingår i Python.
   möjlighet att spara den som PNG. Samma sak fungerar på varje förhandsgranskad
   bildfil
 - **Filer** — alla resurser med storlek, andel och anmärkningar. Väljer du en
-  bildfil visas den i förhandsgranskningen till höger, tillsammans med verkligt
-  pixelmått, visningsmått och om den är överdimensionerad. Dubbelklick öppnar
-  filen i webbläsaren
-- **Råd** — samma råd som kommandoraden ger, färgade efter allvarsgrad
+  bildfil visas den i förhandsgranskningen till höger, med verkligt pixelmått,
+  hur stor rutan är, hur mycket av bilden rutan klipper bort och vilket mått den
+  borde exporteras i. Väljer du ett typsnitt visas ett prov: texten annonsen
+  faktiskt sätter i det, en rad med å, ä och ö, och hur många olika tecken
+  annonsen använder ur filen. Dubbelklick öppnar filen i webbläsaren
+- **Råd** — samma råd som kommandoraden ger, grupperade efter vem som kan göra
+  något åt dem
 - Knappar för att spara HTML-rapport och JSON, eller öppna rapporten direkt
 - Vid sidskanning fylls resultatlistan med sidan överst och en rad per annons.
   Sidposten visar annonserna i Översikt, **varje annons samtliga filer med vikt** i
@@ -273,6 +276,36 @@ Mot IAB:s riktvärde på 150 kB för initial laddning.
 | D | ≤ 1 MB |
 | F | > 1 MB |
 
+## Råden
+
+Annonserna görs internt i BannerBoo, och råden är skrivna för den som bygger dem.
+De är grupperade efter vem som kan göra något åt saken:
+
+| Grupp | Innehåll |
+|---|---|
+| Det här gör ni i BannerBoo | beskära och komprimera bilder, radera dolda lager, använda färre typsnitt, begränsa animationen |
+| Det här gör ni på sajten | lazy load och placering i Advanced Ads |
+| Det här styrs av BannerBoo | serverkomprimering, typsnittsformat, cache, GSAP — sådant som bara BannerBoo kan ändra |
+
+Prognosen längst ned har två nivåer av samma skäl: **det ni kan göra i BannerBoo**,
+och **om BannerBoo också gör sin del**. Den första är den ni faktiskt styr över.
+
+### Bilder som rutan beskär
+
+BannerBoo lägger bilder med `background-size: cover`: bilden skalas tills den
+fyller rutan, och det som sticker utanför klipps bort. De bortklippta pixlarna
+laddas ändå. En bild på 2400 × 1600 px i en ruta på 1200 × 700 px visar bara
+2400 × 1400 px — rådet blir att beskära den till det måttet innan uppladdning.
+Är bilden dessutom större än 2× rutan föreslås att den skalas ner.
+
+### Typsnitt och SVG
+
+Ett typsnitt laddas i sin helhet även när annonsen bara använder några tecken ur
+det. Råden visar vilken text varje typsnitt bär och föreslår att två behålls. Bär
+något typsnitt längre text behålls det; bär alla bara korta ord behålls de
+lättaste, och orden i de tyngre görs som SVG med konturerade bokstäver — ett par
+kB i stället för ett helt typsnitt.
+
 ## Egna råd
 
 Råden ligger i en egen sektion högst upp i `annonsvikt.py`, märkt
@@ -290,12 +323,16 @@ def rad_eget(a: "Analys") -> list[Rad]:
         gor=["Konkret steg", "Konkret steg"],
         sparar=antal_byte,      # 0 om okänt
         allvar="hög",           # kritisk | hög | medel | låg
-        valfritt=False,         # True = större ingrepp, utanför huvudprognosen
+        ansvar="ni",            # ni | sajten | bannerboo
     )]
 ```
 
-Inget annat i filen behöver röras. Råden sorteras automatiskt efter uppskattad
-besparing.
+Inget annat i filen behöver röras. Råden grupperas efter `ansvar` och sorteras
+inom gruppen efter uppskattad besparing.
+
+Sidnivåråd skrivs på samma sätt med `@sidregel(prioritet)`. Handlar ett sidråd om
+att jämföra annonser med varandra ska det bara ges när sidan har minst två —
+med en enda annons säger dess egna råd redan samma sak.
 
 Besparingar räknas per resurs, inte per råd, så samma vinst kan aldrig räknas
 två gånger när flera råd berör samma fil.

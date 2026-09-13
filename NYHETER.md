@@ -4,6 +4,12 @@ Punkterna under den översta rubriken som matchar `VERSION` i `annonsvikt.py`
 hamnar i `version.json` och visas i uppdateringsnotisen i programmet. Håll dem
 korta — de ska rymmas på en rad i fönstret.
 
+## 1.4.0
+
+- Förhandsgranska typsnitten med texten annonsen sätter i dem
+- Bilder som rutan beskär får rådet att beskäras före uppladdning
+- Råden är skrivna för annonser ni bygger själva i BannerBoo
+
 ## 1.3.1
 
 - Uppdatera nu-knappen syns även i ett fönster som inte är maximerat
