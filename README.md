@@ -121,6 +121,13 @@ inbäddningskoden som BannerBoo ger dig att klistra in på sajten:
 Adressen plockas ut ur koden, och en iframe-inbäddning översätts till laddarens
 adress, så att samma annons mäts likadant oavsett vilken form du råkat kopiera.
 
+Samma sak gäller en adress som fått en annan sajts adress framför sig. Slack gör
+det med den protokollrelativa adressen i inbäddningskoden:
+`https://arbetsyta.slack.com//embed.bannerboo.com/b990849fd8c4b` mäts som
+`https://embed.bannerboo.com/b990849fd8c4b`. Svarar adressen med ett fel, som
+HTTP 404, säger rapporten att där inte finns någon annons — i stället för att
+väga felsidan.
+
 | Flagga | Betydelse |
 |---|---|
 | `--vantetid SEK` | hur länge annonsen får rulla innan mätningen avslutas (standard 12) |
@@ -276,6 +283,17 @@ bäddar in annonsen. Sidan laddas med tom cache och varje nätverkssvar spelas i
 Överförda byte kommer från Playwrights `sizes()` — alltså vad som faktiskt gick
 över tråden **efter** komprimering, inte filstorleken på disk.
 
+Hämtas samma fil flera gånger räknas den en gång. Video hämtas med
+range-förfrågningar, och en video som spelas automatiskt hämtas två gånger:
+webbläsaren börjar hämta den när sidan läses in, och BannerBoos spelare anropar
+sedan `load()`, som börjar om. Om den första hämtningen hinner bli klar eller
+avbryts beror på tajmingen, och en avbruten hämtning har inga mått i Playwright. Därför är det
+hämtningen som fick med hela filen som räknas, så att vikten blir densamma
+varje gång. Anmärkningen visar vad som hände: *avbröts och hämtades om*, eller
+*hämtades 2 gånger, räknad en gång* när båda blev klara. Kom ingen hämtning i mål
+räknas filens storlek enligt serverns svar, med anmärkningen *avbröts — räknad
+som hela filen*, eftersom det inte syns hur mycket som hann komma fram.
+
 Därefter körs en sond inne i annonsens egen iframe. Den läser sådant som inte
 går att få fram statiskt:
 
@@ -305,7 +323,7 @@ De är grupperade efter vem som kan göra något åt saken:
 
 | Grupp | Innehåll |
 |---|---|
-| Det här gör ni i BannerBoo | beskära och komprimera bilder, radera dolda lager, använda färre typsnitt, begränsa animationen |
+| Det här gör ni i BannerBoo | beskära och komprimera bilder, radera dolda lager, använda färre typsnitt och inga gjorda för andra skriftsystem, begränsa animationen |
 | Det här gör ni på sajten | lazy load och placering i Advanced Ads |
 | Det här styrs av BannerBoo | serverkomprimering, typsnittsformat, cache, GSAP — sådant som bara BannerBoo kan ändra |
 
@@ -327,6 +345,13 @@ det. Råden visar vilken text varje typsnitt bär och föreslår att två behål
 något typsnitt längre text behålls det; bär alla bara korta ord behålls de
 lättaste, och orden i de tyngre görs som SVG med konturerade bokstäver — ett par
 kB i stället för ett helt typsnitt.
+
+Ett typsnitt gjort för ett annat skriftsystem får ett eget råd. Noto Sans TC är
+gjort för traditionell kinesiska och väger 5–6 MB per snitt, medan ett typsnitt
+för latinska alfabet väger 75–165 kB hos BannerBoo. Varje typsnittsfil över 1 MB
+räknas som ett sådant, oavsett hur lite text den bär. Rådet är att sätta texten
+i ett typsnitt som annonsen redan laddar, eller göra korta ord som SVG, och ett
+sådant typsnitt räknas aldrig till de två som behålls.
 
 ## Egna råd
 

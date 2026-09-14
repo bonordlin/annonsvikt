@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 SAKNAS_MEDDELANDE = (
     "Playwright saknas i den här Python-miljön.\n\n"
@@ -83,6 +83,15 @@ FAKTOR_PNG_KOMPRIMERING = 0.60
 
 # Ett par ord konverterade till konturer och sparade som SVG.
 SVG_ORD_BYTE = 1500
+
+# Ett typsnitt för latinska alfabet väger hos BannerBoo 75–165 kB per snitt (Lato,
+# Big Shoulders Display, Oswald, Poppins, Raleway). En fil över gränsen innehåller
+# tecken för andra skriftsystem — Noto Sans TC, gjort för kinesiska, väger 5–6 MB.
+TUNGT_TYPSNITT = 1000 * KB
+# Vad ett typsnitt för latinska alfabet får antas väga när ett tungt byts ut mot ett
+# som annonsen inte redan laddar. Övre delen av spannet ovan, så att vinsten inte
+# överskattas.
+LATINSKT_TYPSNITT_BYTE = 150 * KB
 
 # Animationen fångas som bildrutor. I en animerad annons är ingen ruta exakt lik
 # den förra — en pulserande knapp räcker — så dubbletter går inte att slå ihop.
@@ -263,10 +272,88 @@ def rad_dolda_resurser(a: "Analys") -> list[Rad]:
     ]
 
 
+@regel(96)
+def rad_tungt_typsnitt(a: "Analys") -> list[Rad]:
+    """Ett typsnitt gjort för ett annat skriftsystem väger megabyte, hur få tecken
+    annonsen än sätter i det. Det ska bytas ut, inte bantas."""
+    tunga = tunga_typsnitt(a)
+    if not tunga:
+        return []
+    hus = husets_typsnitt(a)
+    # Förslaget ska vara ett namn som går att välja i BannerBoo, inte ett filnamn.
+    grupper = typsnitt_per_familj(a)
+    namngivna = sorted(fam for fam in hus if grupper[fam]["filer"][0].typsnitt_familj)
+    total = a.totalvikt or 1
+    rader = []
+    for fam, g in sorted(tunga.items(), key=lambda x: -x[1]["vikt"]):
+        kort = bool(g["text"]) and g["unika"] <= LANG_TEXT_TECKEN
+        flera = len(g["filer"]) > 1
+        filen, den = ("filerna", "de") if flera else ("filen", "den")
+        kvar = ersattning_for_tungt(g, hus)
+        vinst = sum(r.storlek - min(r.storlek, kvar) for r in g["filer"])
+
+        if kort:
+            text = g["text"] if len(g["text"]) <= 40 else g["text"][:39] + "…"
+            rubrik = f"Byt typsnitt på \"{text}\" — {fam} väger {fmt(g['vikt'])}"
+        else:
+            rubrik = f"Byt ut {fam} — typsnittet väger {fmt(g['vikt'])}"
+
+        skrift = typsnittets_skriftsystem(fam)
+        if skrift:
+            varfor = f"{fam} är gjort för {skrift} och innehåller tiotusentals tecken."
+        else:
+            varfor = (
+                f"Ett typsnitt för svensk text väger sällan mer än ett par hundra kB. "
+                f"{fam} väger {fmt(g['vikt'])} och innehåller tecken för andra skriftsystem."
+            )
+        if g["unika"]:
+            varfor += (
+                f" Annonsen använder {antal(g['unika'], 'tecken', 'tecken')} ur det, men "
+                f"hela {filen} laddas ändå"
+            )
+        else:
+            varfor += f" Hela {filen} laddas ändå"
+        andel = g["vikt"] / total
+        varfor += f" — {den} står för {procent(andel, 1)} av annonsens vikt." if andel >= 0.3 else "."
+
+        if namngivna:
+            gor = [
+                f"Sätt texten i {' eller '.join(namngivna)}, som annonsen redan laddar. "
+                f"Då försvinner {filen} helt."
+            ]
+        elif hus:
+            gor = [f"Sätt texten i ett typsnitt som annonsen redan laddar. Då försvinner {filen} helt."]
+        else:
+            gor = [
+                "Välj ett typsnitt gjort för latinska alfabet. Hos BannerBoo väger de "
+                "oftast under 200 kB."
+            ]
+        if kort:
+            gor.append(
+                "Ska orden ha just det här utseendet: skriv dem i ert designverktyg, "
+                "konvertera texten till konturer och ladda upp som SVG i BannerBoo. Då "
+                "väger de ett par kB."
+            )
+        rader.append(
+            Rad(
+                rubrik=rubrik,
+                varfor=varfor,
+                gor=gor,
+                sparar=vinst,
+                allvar="kritisk",
+                ansvar="ni",
+            )
+        )
+    return rader
+
+
 @regel(95)
 def rad_typsnitt_i_annonsen(a: "Analys") -> list[Rad]:
-    """Fler än två typsnitt. Orden i de övriga görs bättre som SVG."""
-    grupper = typsnitt_per_familj(a)
+    """Fler än två typsnitt. Orden i de övriga görs bättre som SVG.
+
+    Tunga typsnitt har ett eget råd och räknas inte hit."""
+    tunga = tunga_typsnitt(a)
+    grupper = {fam: g for fam, g in typsnitt_per_familj(a).items() if fam not in tunga}
     if len(grupper) < 3:
         return []
     hus = husets_typsnitt(a)
@@ -465,12 +552,15 @@ def rad_typsnitt_format(a: "Analys") -> list[Rad]:
         return []
     vikt = sum(r.storlek for r in ttf)
     kvar = int(vikt * FAKTOR_TTF_TILL_WOFF2 * FAKTOR_SUBSET)
+    formaten = sorted({r.underformat for r in ttf})
+    format_text = " och ".join(formaten)
     return [
         Rad(
-            rubrik="BannerBoo levererar typsnitten som ttf",
+            rubrik=f"BannerBoo levererar typsnitten som {format_text}",
             varfor=(
                 f"{antal(len(ttf), 'typsnitt', 'typsnitt')} ({fmt(vikt)}) laddas i "
-                "skrivbordsformatet ttf, med alla tecken för alla språk. Woff2 är ungefär "
+                f"{'skrivbordsformaten' if len(formaten) > 1 else 'skrivbordsformatet'} "
+                f"{format_text}, med alla tecken för alla språk. Woff2 är ungefär "
                 "45 % mindre, och ett typsnitt beskuret till de tecken som används ännu mindre."
             ),
             gor=[
@@ -643,6 +733,7 @@ class Resurs:
     sparning: bool = False
     bibliotek: str = ""
     frame: str = ""
+    hamtning: str = ""  # anmärkning när en hämtning av filen avbröts
     # bildspecifikt
     nat_b: int = 0
     nat_h: int = 0
@@ -793,6 +884,12 @@ MONSTER_SRC = re.compile(
     r"""(?:src|href)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))""", re.I
 )
 MONSTER_TAGG = re.compile(r"<[^>]*>")
+# En BannerBoo-adress som hamnat efter en annan adress. Slack gör en länk av den
+# protokollrelativa adressen i inbäddningskoden och sätter arbetsytan framför:
+# https://arbetsyta.slack.com//embed.bannerboo.com/b690d14007e09?responsive=1
+MONSTER_HOPKLISTRAD = re.compile(
+    r"^https?://[^/?#]+/+(?:https?:/+)?((?:[\w-]+\.)*bannerboo\.com/.*)$", re.I
+)
 
 
 def _adress_ur_kod(text: str) -> str:
@@ -824,6 +921,12 @@ def normalisera_url(indata: str) -> str:
         return f"https://embed.bannerboo.com/{s}"
     if not s.startswith(("http://", "https://")):
         s = "https://" + s
+
+    # Utan det här skannas den andra sajtens sida — och mäts som om den vore annonsen.
+    traff = MONSTER_HOPKLISTRAD.match(s)
+    while traff:
+        s = "https://" + traff.group(1)
+        traff = MONSTER_HOPKLISTRAD.match(s)
 
     # En iframe-adress pekar på själva kreativen. Laddarens adress ger samma
     # annons men mäter det en riktig sida faktiskt hämtar, inklusive laddaren.
@@ -1160,7 +1263,7 @@ def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: i
             inspelat.append({"req": req, "sizes": storlekar})
 
         def vid_fel(req):
-            inspelat.append({"req": req, "sizes": {}, "fel": req.failure})
+            inspelat.append({"req": req, "sizes": {}, "fel": req.failure or "misslyckades"})
 
         kontext.on("response", vid_svar)
         kontext.on("requestfinished", vid_klar)
@@ -1233,11 +1336,12 @@ def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: i
         except Exception:
             pass
 
-        # Kroppar hämtas efter att sidan är klar; de ligger kvar i minnet.
+        # Kroppar hämtas efter att sidan är klar; de ligger kvar i minnet. En
+        # avbruten hämtning har ingen kropp att hämta.
         kroppar = {}
         for post in inspelat:
             svar = poster.get(post["req"])
-            if not svar:
+            if not svar or post.get("fel"):
                 continue
             try:
                 kroppar[post["req"]] = svar.body()
@@ -1269,6 +1373,7 @@ def mat_i_webblasare(url: str, vantetid: float, huvud: bool, bredd: int, hojd: i
                     "huvudbyte": (post.get("sizes") or {}).get("responseHeadersSize", 0),
                     "kropp": kropp,
                     "ram": (req.frame.url if req.frame else ""),
+                    "fel": post.get("fel") or "",
                 }
             )
 
@@ -1338,6 +1443,19 @@ def grundanimation(kod: str) -> str:
     return kod
 
 
+def antal_loopar(varde) -> int | None:
+    """BannerBoo skriver antalet som text: "0" för en loop utan slut, "3" för tre.
+
+    Spelaren gör en loop utan slut även av ett tomt värde, så det gör vi också.
+    None när värdet inte går att läsa."""
+    if varde is None or str(varde).strip() == "":
+        return 0
+    try:
+        return int(float(varde))
+    except (TypeError, ValueError):
+        return None
+
+
 def las_bannerboo(text: str, a: Analys) -> None:
     m = re.search(r"var c=(\{.*?\});function ", text, re.S)
     if not m:
@@ -1352,7 +1470,7 @@ def las_bannerboo(text: str, a: Analys) -> None:
     anim = c.get("item_animation") or {}
     if anim:
         a.anim_sekunder = float(anim.get("animtime") or 0) or None
-        a.anim_loopar = anim.get("playtimes")
+        a.anim_loopar = antal_loopar(anim.get("playtimes"))
         for obj in (anim.get("objects") or {}).values():
             for nyckel in ("animin", "animout", "animpulse"):
                 kod = ((obj.get(nyckel) or {}).get("code") or "").lower()
@@ -1374,6 +1492,92 @@ def las_bannerboo(text: str, a: Analys) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ANALYS
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+def las_innehallsomfang(varde: str) -> tuple[int, int, int] | None:
+    """Content-Range "bytes 0-1510679/1510680" → (0, 1510679, 1510680).
+
+    Hela filens storlek blir 0 när servern inte uppger den ("bytes 0-99/*")."""
+    traff = re.fullmatch(r"\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*", varde or "", re.I)
+    if not traff:
+        return None
+    hela = int(traff.group(3)) if traff.group(3) != "*" else 0
+    return int(traff.group(1)), int(traff.group(2)), hela
+
+
+def sla_ihop_hamtningar(hamtningar: list[dict]) -> tuple[dict, int, str]:
+    """Alla hämtningar av en adress blir en storlek, och filen räknas en gång.
+
+    Video hämtas med range-förfrågningar, och Chromium avbryter ofta sin första
+    hämtning och börjar om. En avbruten hämtning saknar mått i Playwright, så den
+    som bara räknar första hämtningen får 0 byte för en fil på 1,5 MB.
+
+    Fick någon hämtning med hela filen är det den som räknas. Annars räknas
+    delarna som kom fram. Kom ingen hämtning i mål men servern uppgav filens
+    storlek, räknas hela filen: webbläsaren hade börjat hämta den, och hur mycket
+    som hann komma syns inte.
+
+    Returnerar (hämtningen vars huvuden och kropp ska användas, byte, anmärkning)."""
+
+    def byte(h: dict) -> int:
+        # 204 och omdirigeringar saknar mått i Playwright; då får kroppen avgöra.
+        return h["overfort"] if h["overfort"] > 0 else len(h["kropp"] or b"")
+
+    def omfang(h: dict):
+        return las_innehallsomfang(h["huvuden"].get("content-range", ""))
+
+    def hel_fil(h: dict) -> bool:
+        if h["status"] != 206:
+            return True
+        o = omfang(h)
+        return bool(o and o[0] == 0 and o[2] and o[1] == o[2] - 1)
+
+    def uppgiven_storlek(h: dict) -> int:
+        o = omfang(h)
+        if o:
+            return o[2]
+        if h["status"] != 200:
+            return 0
+        try:
+            return int(h["huvuden"].get("content-length") or 0)
+        except ValueError:
+            return 0
+
+    klara = [h for h in hamtningar if not h["fel"]]
+    hela = [h for h in klara if hel_fil(h)]
+
+    if hela:
+        basta = max(hela, key=byte)
+        if len(klara) < len(hamtningar):
+            return basta, byte(basta), "avbröts och hämtades om"
+        # Blev båda hämtningarna klara gick filen över nätet två gånger. Vikten ska
+        # ändå inte bero på om den första hann bli klar innan webbläsaren började
+        # om, så det syns i anmärkningen i stället. En träff i cachen har inga
+        # överförda byte och räknas inte.
+        over_natet = sum(1 for h in hela if h["overfort"] > 0)
+        if over_natet > 1:
+            return basta, byte(basta), f"hämtades {over_natet} gånger, räknad en gång"
+        return basta, byte(basta), ""
+
+    # Bara hämtningar som fått svar räknas som avbrutna. Utan svar misslyckades
+    # förfrågan innan något alls hämtades.
+    avbrutna = [h for h in hamtningar if h["fel"] and h["status"]]
+    if klara:
+        basta = max(klara, key=byte)
+        storlek = sum(byte(h) for h in klara)
+    else:
+        basta = avbrutna[0] if avbrutna else hamtningar[0]
+        storlek = 0
+    if not avbrutna:
+        return basta, storlek, ""
+
+    uppgiven = max(uppgiven_storlek(h) for h in hamtningar)
+    if not uppgiven:
+        return basta, storlek, "avbröts innan den blev klar"
+    if uppgiven > storlek:
+        return basta, uppgiven, "avbröts — räknad som hela filen"
+    # Delarna som kom fram täcker hela filen.
+    return basta, storlek, "avbröts och hämtades om"
 
 
 def bygg_analys(kalla, lage, forsta_kropp, rader, sonder, konsol, navfel="") -> Analys:
@@ -1399,17 +1603,16 @@ def bygg_analys(kalla, lage, forsta_kropp, rader, sonder, konsol, navfel="") -> 
                 a.typsnitt_laddade.add(f["familj"])
         a.typsnitt_deklarerade += len(s.get("snitt", []))
 
-    sedda = set()
+    # Samma adress kan ha hämtats flera gånger — video i bitar, eller en hämtning
+    # som avbröts och gjordes om. Det blir en resurs.
+    per_url: dict[str, list[dict]] = {}
     for rad in rader:
-        url = rad["url"]
-        if url in sedda:
-            continue
-        sedda.add(url)
+        per_url.setdefault(rad["url"], []).append(rad)
+
+    for url, hamtningar in per_url.items():
+        rad, overfort, hamtning = sla_ihop_hamtningar(hamtningar)
         kategori, underformat = kategorisera(rad["resurstyp"], rad["huvuden"].get("content-type", ""), url)
         kropp = rad["kropp"] or b""
-        overfort = rad["overfort"]
-        if not overfort or overfort < 0:
-            overfort = len(kropp)  # t.ex. 204/redirect där Playwright saknar mått
         kodning = (rad["huvuden"].get("content-encoding") or "").lower()
         cachebar, cache_info = cache_bedomning(rad["huvuden"])
         värd = urllib.parse.urlparse(url).netloc
@@ -1429,6 +1632,7 @@ def bygg_analys(kalla, lage, forsta_kropp, rader, sonder, konsol, navfel="") -> 
             sparning=bool(MONSTER_SPARNING.search(url)),
             bibliotek=hitta_bibliotek(url),
             frame=rad["ram"],
+            hamtning=hamtning,
         )
 
         # Hur litet hade det blivit med gzip?
@@ -1493,6 +1697,12 @@ def bedom_misslyckande(a: Analys, lage: str, forsta_kropp: str) -> str:
     if not a.resurser:
         return "Ingenting kunde laddas från adressen."
 
+    # Svarar adressen med ett fel är det felsidan som mätts, inte en annons — och
+    # en felsida kan ladda både skript, typsnitt och bilder.
+    egen = next((r for r in a.resurser if r.url.rstrip("/") == a.kalla.rstrip("/")), None)
+    if egen and egen.status >= 400:
+        return f"Adressen svarade med HTTP {egen.status} — där finns ingen annons att mäta."
+
     # En riktig BannerBoo-annons ger alltid en konfiguration med lager och mått.
     if lage == "skript" and not a.lager and a.totalvikt < 5 * KB:
         return (
@@ -1554,14 +1764,63 @@ def typsnitt_per_familj(a: Analys) -> dict:
 LANG_TEXT_TECKEN = 20  # fler olika tecken än så är löptext, inte ett par ord
 
 
+def tunga_typsnitt(a: Analys) -> dict:
+    """Familjer med en fil över TUNGT_TYPSNITT, i samma form som typsnitt_per_familj.
+
+    Ett sådant typsnitt är gjort för ett annat skriftsystem och är fel val för
+    svensk text, hur lite text det än bär."""
+    return {
+        fam: g
+        for fam, g in typsnitt_per_familj(a).items()
+        if max(r.storlek for r in g["filer"]) >= TUNGT_TYPSNITT
+    }
+
+
+# Noto-familjernas tillägg för skriftsystem. Noto Sans TC är Noto Sans med
+# tiotusentals kinesiska tecken — namnet avslöjar det bara för den som vet.
+SKRIFTSYSTEM = {
+    "TC": "traditionell kinesiska",
+    "HK": "kinesiska som den skrivs i Hongkong",
+    "SC": "förenklad kinesiska",
+    "JP": "japanska",
+    "KR": "koreanska",
+}
+
+
+def typsnittets_skriftsystem(familj: str) -> str:
+    """"Noto Sans TC" → "traditionell kinesiska". Tom sträng om namnet inte säger det.
+
+    Bara Noto tolkas: i andra familjer betyder SC ofta kapitäler, inte kinesiska."""
+    traff = re.fullmatch(r"Noto (?:Sans|Serif)\b.*\b(TC|HK|SC|JP|KR)", familj.strip())
+    if traff:
+        return SKRIFTSYSTEM[traff.group(1)]
+    if re.search(r"\bCJK\b|Source Han", familj):
+        return "kinesiska, japanska och koreanska"
+    return ""
+
+
+def ersattning_for_tungt(g: dict, hus: set) -> int:
+    """Vad texten i ett tungt typsnitt väger efter bytet, per fil.
+
+    Laddar annonsen redan ett annat typsnitt kostar bytet ingenting. Annars blir
+    korta ord SVG, och längre text får ett typsnitt för latinska alfabet."""
+    if hus:
+        return 0
+    if g["text"] and g["unika"] <= LANG_TEXT_TECKEN:
+        return SVG_ORD_BYTE
+    return LATINSKT_TYPSNITT_BYTE
+
+
 def husets_typsnitt(a: Analys, antal_att_behalla: int = 2) -> set:
     """De typsnitt som är värda att behålla som riktiga typsnitt.
 
     Typsnitt med längre text behålls först — löptext ska inte bli en bild. Bär
     alla typsnitt bara korta ord avgör vikten i stället: de tunga sparar mest på
-    att göras som SVG, så det är de lätta som behålls.
+    att göras som SVG, så det är de lätta som behålls. Ett typsnitt gjort för ett
+    annat skriftsystem behålls aldrig, se tunga_typsnitt.
     """
-    grupper = typsnitt_per_familj(a)
+    tunga = tunga_typsnitt(a)
+    grupper = {fam: g for fam, g in typsnitt_per_familj(a).items() if fam not in tunga}
 
     def nyckel(post):
         g = post[1]
@@ -1577,11 +1836,13 @@ def berakna_potential(a: Analys) -> None:
 
     potential_egen — det ni kan göra själva i BannerBoo: radera dolda lager,
                      beskära, skala och komprimera bilder, göra ord i extra
-                     typsnitt som SVG.
+                     typsnitt som SVG, byta ut typsnitt gjorda för andra
+                     skriftsystem.
     potential      — om BannerBoo dessutom komprimerar sina filer och levererar
                      typsnitten som woff2 med bara de tecken som används.
     """
     hus = husets_typsnitt(a)
+    tunga = tunga_typsnitt(a)
     for r in a.resurser:
         if r.dold_orsak:
             r.potential_egen = r.potential = 0
@@ -1600,8 +1861,12 @@ def berakna_potential(a: Analys) -> None:
             continue
 
         if r.kategori == "typsnitt":
-            extra = bool(r.typsnitt_familj) and len(hus) >= 2 and r.typsnitt_familj not in hus
-            egen = min(r.storlek, SVG_ORD_BYTE) if extra else r.storlek
+            familj = r.typsnitt_familj or r.filnamn
+            if familj in tunga:
+                egen = min(r.storlek, ersattning_for_tungt(tunga[familj], hus))
+            else:
+                extra = bool(r.typsnitt_familj) and len(hus) >= 2 and r.typsnitt_familj not in hus
+                egen = min(r.storlek, SVG_ORD_BYTE) if extra else r.storlek
             if r.underformat in ("ttf", "otf"):
                 bannerboo = int(r.storlek * FAKTOR_TTF_TILL_WOFF2 * FAKTOR_SUBSET)
             elif r.underformat in ("woff", "woff2"):
@@ -1681,8 +1946,8 @@ def skriv_rapport(a: Analys, rad: list[Rad], visa_alla: bool) -> None:
         p("  Ska en hel sida genomsökas efter annonser anges sidans adress i stället:")
         p("      annonsvikt upphandling24.se")
         p("")
-        p("  Ett vanligt misstag är att adressen råkat bli hopklistrad, till exempel")
-        p("  embed.bannerboo.com/embed.bannerboo.com/… — kontrollera att den ser rätt ut.")
+        p("  Ett vanligt misstag är att adressen råkat klistras in två gånger i rad —")
+        p("  kontrollera att den ser rätt ut.")
         p("")
         return
 
@@ -1767,6 +2032,8 @@ def skriv_rapport(a: Analys, rad: list[Rad], visa_alla: bool) -> None:
             anm.append("spårning")
         if r.tredjepart and not r.bibliotek:
             anm.append("extern värd")
+        if r.hamtning:
+            anm.append(r.hamtning)
         if r.status >= 400:
             anm.append(f"HTTP {r.status}")
         p(
@@ -1998,6 +2265,8 @@ def html_innehall(a: Analys, rad: list[Rad], rubrik: str | None = None) -> list[
             flaggor.append("<span class='flagga'>spårning</span>")
         if r.tredjepart and not r.bibliotek:
             flaggor.append("<span class='flagga'>extern värd</span>")
+        if r.hamtning:
+            flaggor.append(f"<span class='flagga'>{e(r.hamtning)}</span>")
         if not r.cachebar:
             flaggor.append(f"<span class='flagga'>cache: {e(r.cache_info)}</span>")
         # Avbilder på över ~300 kB base64 utelämnas: rapporten ska gå att skicka.
@@ -2289,8 +2558,12 @@ SIDSOND = r"""
 
 
 def annons_id(url: str) -> str:
-    """Plockar ut BannerBoo-id ur en laddar- eller iframe-URL."""
-    if RENDERAREN in url:
+    """Plockar ut BannerBoo-id ur en laddar- eller iframe-URL.
+
+    Adressen måste ligga hos BannerBoo. En sida kan ha en BannerBoo-adress i sin
+    egen adress — https://arbetsyta.slack.com//embed.bannerboo.com/… — och är
+    ändå ingen annons."""
+    if RENDERAREN in url or not ar_annonslank(url):
         return ""
     for monster in (MONSTER_IFRAME, MONSTER_LADDARE):
         m = monster.search(url)
@@ -2496,7 +2769,8 @@ def analysera_sida(url: str, args) -> Sidanalys:
 
 def ar_annonslank(url: str) -> bool:
     """Är det här en annons hos BannerBoo, eller en sida att skanna?"""
-    return urllib.parse.urlparse(url).netloc.lower().endswith("bannerboo.com")
+    vard = urllib.parse.urlparse(url).hostname or ""
+    return vard == "bannerboo.com" or vard.endswith(".bannerboo.com")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

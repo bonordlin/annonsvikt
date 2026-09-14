@@ -1195,8 +1195,8 @@ class Annonsviktsfonster(tk.Tk):
                 "    https://embed.bannerboo.com/bb6a6b2536dcc\n\n"
                 "Ska en hel sida genomsökas efter annonser anges sidans adress:\n"
                 "    upphandling24.se\n\n"
-                "Kontrollera också att adressen inte råkat bli hopklistrad,\n"
-                "till exempel embed.bannerboo.com/embed.bannerboo.com/…"
+                "Kontrollera också att adressen inte råkat klistras in\n"
+                "två gånger i rad."
             ),
         ).grid(row=0, column=0, sticky="w", pady=8)
 
@@ -1389,6 +1389,8 @@ class Annonsviktsfonster(tk.Tk):
             anm.append("spårning")
         if r.tredjepart and not r.bibliotek:
             anm.append("extern värd")
+        if r.hamtning:
+            anm.append(r.hamtning)
         if r.status >= 400:
             anm.append(f"HTTP {r.status}")
         return anm

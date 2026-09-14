@@ -4,6 +4,13 @@ Punkterna under den översta rubriken som matchar `VERSION` i `annonsvikt.py`
 hamnar i `version.json` och visas i uppdateringsnotisen i programmet. Håll dem
 korta — de ska rymmas på en rad i fönstret.
 
+## 1.5.1
+
+- Video räknas med sin verkliga vikt — tidigare kunde den stå som 0 byte
+- Adresser som klistrats in via Slack mäter annonsen, inte Slacks sida
+- Oändligt loopande annonser visas rätt och får råd om animationen
+- Nytt råd när en annons använder ett typsnitt gjort för kinesiska
+
 ## 1.5.0
 
 - Animerade annonser spelas upp i förhandsvyn, med paus och större vy
